@@ -1,0 +1,41 @@
+{
+	# admin endpoint を無効化 (= 既定で 127.0.0.1:2019 に bind されるが、本構成では使わない)
+	admin off
+	# 自己署名 CA (= 「Caddy Local Authority」) を /data に置く。volume で永続化。
+	# ブラウザ初回アクセス時に「信頼できない証明書」warning を 1 度許可するだけで以降通る。
+	auto_https disable_redirects
+}
+
+# ───── ローカル開発デフォルト (= localhost、自己署名) ─────
+# ・user → Caddy: HTTPS (自己署名、ブラウザ 1 度許可)
+# ・Caddy → web: 内部 docker network 経由 HTTP (= web は ports 公開せず caddy 経由のみ)
+#
+# 切替例 (README 参照):
+# ・Cloudflare Tunnel 経由 → そのままで OK (= cloudflared → caddy:443 → web:3000)
+# ・自宅サーバ直接公開 → 下記の "localhost {" を独自ドメインに変えて tls を Let's Encrypt 自動取得に:
+#     yui.example.com {
+#       tls user@example.com
+#       reverse_proxy web:3000
+#     }
+localhost {
+	tls internal
+
+	# Spotify Web Playback SDK 等の音声 / WebSocket / SSE がそのまま通るよう
+	# buffer 無しの全二重で reverse_proxy
+	reverse_proxy web:3000 {
+		flush_interval -1
+	}
+
+	# 大きめのアップロード (= VRM model 数十 MB、メール添付) のため
+	# request body size を緩める
+	request_body {
+		max_size 200MB
+	}
+
+	# 簡易アクセスログ (= 認証ゲートの動作確認用)
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}

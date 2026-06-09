@@ -1,0 +1,58 @@
+{
+  "name": "yui-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "3D アバターが声と表情で応答する、個人ホスト向け AI 秘書 (Yui Agent)",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sakuranaga/yui-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sakuranaga/yui-agent/issues"
+  },
+  "homepage": "https://github.com/sakuranaga/yui-agent#readme",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "next dev --webpack -H 0.0.0.0",
+    "build": "next build --webpack",
+    "start": "next start -H 0.0.0.0",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit --incremental false",
+    "db:migrate": "tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.40.1",
+    "@pixiv/three-vrm": "3.5.3",
+    "@pixiv/three-vrm-animation": "3.5.3",
+    "drizzle-orm": "0.45.2",
+    "ioredis": "5.11.0",
+    "isomorphic-dompurify": "3.16.0",
+    "jose": "6.2.3",
+    "next": "16.2.7",
+    "pg": "8.21.0",
+    "postgres": "3.4.9",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "react-markdown": "9.1.0",
+    "remark-gfm": "4.0.1",
+    "rss-parser": "3.13.0",
+    "three": "0.171.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "3.3.5",
+    "@types/node": "22.19.19",
+    "@types/pg": "8.20.0",
+    "@types/react": "19.2.15",
+    "@types/react-dom": "19.2.3",
+    "@types/three": "0.171.0",
+    "drizzle-kit": "0.28.1",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.7",
+    "tsx": "4.22.3",
+    "typescript": "5.9.3"
+  }
+}

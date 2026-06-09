@@ -1,0 +1,33 @@
+# Production overrides for docker-compose.yml
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# 上書き内容:
+#   - web を Dockerfile の production target (= next build + next start) でビルド
+#   - ソース volume mount を解除 (= image に焼き込んだ bundle を使う)
+#   - NODE_ENV=production
+#   - watch polling など開発用 env を除外
+#
+# 共通サービス (postgres / valkey / caddy / searxng / discord-bot) は base の
+# docker-compose.yml をそのまま使う。
+
+services:
+  web:
+    build:
+      context: .
+      target: production
+    environment:
+      - NODE_ENV=production
+      # 開発専用 env は production では不要
+      - WATCHPACK_POLLING=
+      - CHOKIDAR_USEPOLLING=
+    # production では HMR 不要なのでソースの bind mount を解除。
+    # 必要なものは image に焼き込み済 (.next / public / src/db)。
+    volumes: !reset []
+    # production target は CMD = npm run start
+    command: ["npm", "run", "start"]
+    # stdin_open / tty は production では不要
+    stdin_open: false
+    tty: false
+    restart: unless-stopped

@@ -1,0 +1,174 @@
+services:
+  # ───── Caddy: HTTPS 終端 + 認証ゲート前段 ─────
+  # ・user → Caddy: HTTPS (= localhost 自己署名、Cloudflare Tunnel なら不要、独自ドメインなら Let's Encrypt)
+  # ・Caddy → web: internal docker network HTTP (web は ports 公開しない)
+  # ・127.0.0.1:443 にだけ bind = LAN から直接 web に到達不可 (= 認証層の外側)
+  caddy:
+    image: caddy:2-alpine
+    container_name: yui-agent-caddy
+    restart: unless-stopped
+    ports:
+      # Mac Docker は privileged port (< 1024) に追加権限要なので 8443 を使う。
+      # → https://localhost:8443 でアクセス。
+      # Linux ホスト + 公開構成なら "443:443" に変えれば https://localhost (port 省略) で OK。
+      - "127.0.0.1:8443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+  web:
+    build:
+      context: .
+      target: dev # ← HMR + tsx 開発用ステージ (production 用は docker-compose.prod.yml)
+    container_name: yui-agent-web
+    # 普段は Caddy 経由 (= https://localhost:8443) でアクセス。
+    # ただし Spotify OAuth の redirect_uri は Spotify 側 strict policy で自己署名 HTTPS
+    # (= https://localhost) が "Insecure" と弾かれ、http://127.0.0.1:PORT/ の loopback
+    # しか受け付けてもらえない。そのため Spotify 連携時だけ http://127.0.0.1:3000/ で
+    # アクセス → OAuth → token 取得 → 普段は Caddy 経由に戻る流れにする。
+    # → 127.0.0.1:3000 を常時 host bind しておくと OSS user が誰でも詰まらず連携できる。
+    # (LAN 外には漏れない、127.0.0.1 のみ bind。dev container 用途を超える前提なし)
+    ports:
+      - "127.0.0.1:3000:3000"
+    expose:
+      - "3000"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - next_cache:/app/.next
+    environment:
+      - NODE_ENV=development
+      - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+      - DEBUG_YUI_PROMPT=${DEBUG_YUI_PROMPT:-0}
+      # 認証ゲート (= 単一 user 共有 token)。未設定なら middleware が起動時に refuse。
+      # 推奨: openssl rand -base64 32 で生成 → .env に書く
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+      # DB に保存する OAuth refresh/access token を AES-256-GCM で暗号化する鍵。
+      # 未設定でも起動はするが OAuth 新規連携で throw。openssl rand -base64 32 で生成。
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      # Spotify OAuth redirect URI (= Spotify dashboard に登録した値と一致)
+      # Spotify は 2025 以降 loopback の自己署名 HTTPS を "Insecure" として拒否するため、
+      # 既定は http://127.0.0.1:3000 (loopback HTTP = Spotify policy で許可される唯一の経路)
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:3000/api/spotify/callback}
+      # safeFetch の private 範囲 allowlist (= 内部 Tailnet / 自宅 LAN の信頼ホスト)
+      - SAFE_FETCH_ALLOWED_HOSTS=${SAFE_FETCH_ALLOWED_HOSTS:-}
+      # TTS / Embedding サーバの URL は user の環境に依存するので、デフォルトは空または
+      # localhost を指定し、`.env` で上書きする運用にする (= 設定 → AI タブの値を優先)。
+      - TTS_URL=${TTS_URL:-}
+      - DATABASE_URL=${DATABASE_URL:-postgres://vroid:vroid@postgres:5432/vroid}
+      - EMBED_URL=${EMBED_URL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-bge-m3}
+      - EMBED_DIMENSIONS=${EMBED_DIMENSIONS:-1024}
+      - MORNING_CHECK_HOUR_JST=${MORNING_CHECK_HOUR_JST:-9}
+      # Discord bot の session id を web 側にも渡す。
+      # - 周期モジュールの「お便り」配信先 (findActiveSessionId) でこの session を
+      #   除外する (Discord 直前に雑談しても、Web 側で通知が消えないように)
+      # - お便り forwardToDiscord 時に bot session 宛てに push して Discord に届ける
+      - DISCORD_SESSION_ID=${DISCORD_SESSION_ID:-}
+      # Valkey (Redis 互換キャッシュ、internal only)
+      - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379}
+    # 外部ホスト (= 自宅 LAN / Tailscale / VPS で TTS / Embedding を別サーバ運用する場合) を
+    # コンテナ内から解決したい時は、`.env` で `EXTRA_HOSTS_TTS` / `EXTRA_HOSTS_EMBED` 等を
+    # 定義した上で、ここに `extra_hosts:` セクションを追加してください。
+    # 例:
+    #   extra_hosts:
+    #     - "tts-host:192.168.1.100"
+    #     - "embed-host:192.168.1.101"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    command: npm run dev
+    tty: true
+    stdin_open: true
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: yui-agent-searxng
+    restart: unless-stopped
+    ports:
+      # ホストから http://localhost:8888 で見える (デバッグ用)。
+      # Yui コンテナからは docker network 経由で http://searxng:8080 で叩く。
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+      - INSTANCE_NAME=yui-searxng
+
+  discord-bot:
+    build: ./apps/discord-bot
+    container_name: yui-agent-discord-bot
+    restart: unless-stopped
+    volumes:
+      - ./apps/discord-bot:/app
+      # node_modules はコンテナ内 (host 上書きを避ける)
+      - discord_bot_node_modules:/app/node_modules
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_OWNER_ID=${DISCORD_OWNER_ID}
+      - DISCORD_SESSION_ID=${DISCORD_SESSION_ID}
+      - YUI_API_URL=http://web:3000
+      # 認証ゲート (= web 側の middleware を通過するための内部トークン)
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+    depends_on:
+      - web
+    tty: true
+    stdin_open: true
+
+  valkey:
+    # Redis 互換のキャッシュ層。host port は expose しない (LAN の既存 Redis :6379
+    # と衝突しないため + キャッシュは internal 用途のみ)。
+    # web コンテナからは http 不要、`valkey:6379` で TCP 接続。
+    # maxmemory 256mb / LRU eviction でキャッシュ的に振る舞う (RDB / AOF なし)。
+    image: valkey/valkey:8-alpine
+    container_name: yui-agent-valkey
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    # ports: 意図的に未公開 (Docker network 内のみ)
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: yui-agent-postgres
+    environment:
+      - POSTGRES_USER=vroid
+      - POSTGRES_PASSWORD=vroid
+      - POSTGRES_DB=vroid
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Expose for psql/inspection from host. Bind to localhost so it's not
+      # reachable from the LAN. Use 5433 to avoid conflict with a host postgres.
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vroid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  node_modules:
+  next_cache:
+  postgres_data:
+  discord_bot_node_modules:
+  caddy_data:
+  caddy_config:

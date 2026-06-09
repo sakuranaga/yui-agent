@@ -1,0 +1,60 @@
+# Dependencies / build artifacts (= image 内で再生成する)
+node_modules
+.next
+out
+build
+dist
+
+# Git / Docker config (= image に焼き込む意味なし)
+.git
+.gitignore
+Dockerfile
+docker-compose.yml
+docker-compose.demo.yml
+.dockerignore
+
+# 機密 (= 絶対に image に入れない)
+.env
+.env.*
+!.env.example
+.claude
+.cursor
+.vscode
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.asc
+*.gpg
+
+# user 永続データ (= 各 host の volume で持つべきもの)
+data
+logs
+
+# OS / IDE / TypeScript build cache
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+
+# OSS prep の編集中ファイル
+*.bak
+*.backup
+*.tmp
+*.swp
+*.orig
+
+# Documentation (= image に焼く必要なし、repo で参照する)
+README.md
+CONTRIBUTING.md
+SECURITY.md
+CREDITS.md
+LICENSE
+CLAUDE.md
+docs
+
+# 過去の作業残骸 (= 念のため)
+screenshots
+backup
+backups

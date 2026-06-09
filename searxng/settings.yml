@@ -1,0 +1,69 @@
+# SearXNG settings for Yui (self-hosted, internal use only).
+# - JSON output 有効 (Yui の web tool が叩く)
+# - limiter 無効 (Yui 一人しか使わないため bot 防止不要)
+# - 主要 engines (Google / DuckDuckGo / Bing / Brave / Wikipedia / GitHub) を有効化
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Yui SearXNG"
+  enable_metrics: false
+
+server:
+  # Yui からの呼び出し時用、rate limiter は off (内部利用なので)
+  limiter: false
+  image_proxy: false
+  # コンテナの 8080 で受ける (host 8888 ↔ container 8080 は compose 側で map)
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "2b1c12271dd64d71503c953bdeb6b159e363af7aaadfafc78ff6659ae968b124"
+  base_url: false
+  public_instance: false
+  # internal なので CORS 緩く (Yui からのみ)
+  default_http_headers:
+    X-Content-Type-Options: nosniff
+    X-Frame-Options: DENY
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "ja"
+  # JSON フォーマット有効化 (デフォルトは html のみ)
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+  default_locale: "ja"
+  query_in_title: true
+  results_on_new_tab: false
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  useragent_suffix: "Yui/0.1"
+  pool_connections: 50
+  pool_maxsize: 50
+  enable_http2: true
+
+# enabled engines のみ列挙 (use_default_settings: true で他は default のまま)
+# default で disabled のもの一部を有効化。
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: qwant
+    disabled: false

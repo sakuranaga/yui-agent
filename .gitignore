@@ -1,0 +1,42 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# 秘密情報 (= AUTH_TOKEN / ENCRYPTION_KEY / OAuth client secrets 等)。
+# .env.example だけが配布される唯一のサンプル。
+.env*.local
+.env
+.env.bak
+.env.backup
+
+# npm / yarn 系の debug 出力
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / editor 系
+.DS_Store
+.vscode/
+.cursor/
+.claude/
+
+# 秘密鍵 / 証明書系
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# TypeScript / Next.js の build cache
+*.tsbuildinfo
+next-env.d.ts
+
+# user 永続データ (= VRM upload / BGM upload / chat 画像添付)
+# runtime で recursive mkdir されるので、配布物に同梱しない。
+/data/
+
+# 内部 worktree 等のメモ
+backup/
+backups/
