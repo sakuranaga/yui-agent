@@ -187,6 +187,7 @@ Yui Agent の体験で最も差別化されるのは **「結衣の声」** で�
 - [`docs/google-oauth-setup.md`](docs/google-oauth-setup.md) — GCal / Gmail OAuth
 - [`docs/spotify-setup.md`](docs/spotify-setup.md) — Spotify Developer
 - [`docs/irodori-tts-setup.md`](docs/irodori-tts-setup.md) — Irodori TTS サーバの構築 (= 声を出すなら必須)
+- [`docs/prompt-presets/`](docs/prompt-presets/) — 追加プロンプトのプリセット例 (= 寄り添いモード / スパルタモード、コピペで使える)
 
 ### 設計メモ (= 未実装 / 検討中)
 
