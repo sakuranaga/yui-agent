@@ -4,14 +4,17 @@
  * TTS 用語辞書 (SettingsModal の「読み方」タブ)。
  * 追加 / 編集 (word・reading) / 有効無効トグル / 削除。検索 input 付き。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { splitForTTS } from "@/lib/split-tts";
+
+const PAGE_LIMIT = 100;
 
 type Entry = {
   id: number;
   word: string;
   reading: string;
   enabled: boolean;
+  source: string;
   created_at: string;
   updated_at: string;
 };
@@ -22,11 +25,16 @@ type SpeakWindow = Window & {
 
 export default function DictionarySection() {
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true); // 初回 / 新規検索の load
+  const [loadingMore, setLoadingMore] = useState(false); // 追加ページ load
   const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [creating, setCreating] = useState(false);
   const [newWord, setNewWord] = useState("");
   const [newReading, setNewReading] = useState("");
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
   // 読み上げテスト用 (保存しない、テストフォーム)。
   const [testInput, setTestInput] = useState("");
   const [testNormalized, setTestNormalized] = useState<string | null>(null);
@@ -107,33 +115,76 @@ export default function DictionarySection() {
     }
   }, [testInput, testBusy]);
 
-  const reload = useCallback(async () => {
+  // 検索語を debounce (= 13 万件規模なので毎キーストロークで叩かない)。
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q.trim()), 250);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const buildUrl = useCallback(
+    (offset: number) =>
+      `/api/tts-dictionary?limit=${PAGE_LIMIT}&offset=${offset}` +
+      (debouncedQ ? `&q=${encodeURIComponent(debouncedQ)}` : ""),
+    [debouncedQ]
+  );
+
+  // page 0 fetch (= 初回 / 検索語確定ごと)。全件は持たず、最初の 1 ページだけ。
+  const fetchFirst = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/tts-dictionary");
+      const res = await fetch(buildUrl(0));
       if (!res.ok) return;
-      const data = (await res.json()) as { entries: Entry[] };
+      const data = (await res.json()) as {
+        count: number;
+        hasMore: boolean;
+        entries: Entry[];
+      };
       setEntries(data.entries ?? []);
+      setTotal(data.count ?? 0);
+      setHasMore(data.hasMore ?? false);
     } catch (e) {
-      console.warn("[dictionary] reload failed:", e);
+      console.warn("[dictionary] fetch failed:", e);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [buildUrl]);
 
   useEffect(() => {
-    // 初回 mount + reload 変化時に再 fetch。
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch
-    void reload();
-  }, [reload]);
+    // 検索語が変わるたびに先頭から取り直す。
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- search/mount fetch
+    void fetchFirst();
+  }, [fetchFirst]);
 
-  const filtered = useMemo(() => {
-    const k = q.trim().toLowerCase();
-    if (!k) return entries;
-    return entries.filter(
-      (e) => e.word.toLowerCase().includes(k) || e.reading.includes(k)
+  // 無限スクロール: 現在ロード済み件数を offset にして次ページを追記。
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await fetch(buildUrl(entries.length));
+      if (!res.ok) return;
+      const data = (await res.json()) as { hasMore: boolean; entries: Entry[] };
+      setEntries((prev) => [...prev, ...(data.entries ?? [])]);
+      setHasMore(data.hasMore ?? false);
+    } catch (e) {
+      console.warn("[dictionary] loadMore failed:", e);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [buildUrl, entries.length, hasMore, loadingMore]);
+
+  // sentinel が見えたら次ページ。IntersectionObserver で固まらせない。
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (ents) => {
+        if (ents[0]?.isIntersecting) void loadMore();
+      },
+      { rootMargin: "240px" }
     );
-  }, [entries, q]);
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [loadMore]);
 
   const patch = async (id: number, body: Record<string, unknown>) => {
     try {
@@ -142,7 +193,10 @@ export default function DictionarySection() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (res.ok) await reload();
+      // 全件再 load せず該当行だけローカル更新 (= スクロール位置を保つ)。
+      if (res.ok) {
+        setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...body } : e)));
+      }
     } catch (e) {
       console.warn("[dictionary] patch failed:", e);
     }
@@ -151,7 +205,10 @@ export default function DictionarySection() {
   const remove = async (id: number) => {
     try {
       const res = await fetch(`/api/tts-dictionary/${id}`, { method: "DELETE" });
-      if (res.ok) await reload();
+      if (res.ok) {
+        setEntries((prev) => prev.filter((e) => e.id !== id));
+        setTotal((t) => Math.max(0, t - 1));
+      }
     } catch (e) {
       console.warn("[dictionary] delete failed:", e);
     }
@@ -171,7 +228,7 @@ export default function DictionarySection() {
         setNewWord("");
         setNewReading("");
         setCreating(false);
-        await reload();
+        await fetchFirst(); // 先頭ページから取り直して新規エントリを反映
       }
     } catch (e) {
       console.warn("[dictionary] create failed:", e);
@@ -272,13 +329,19 @@ export default function DictionarySection() {
         </button>
       </div>
 
+      <div className="dictionary-count">
+        {debouncedQ ? `「${debouncedQ}」 ` : "全 "}
+        {total.toLocaleString()} 件
+        {entries.length < total ? ` (${entries.length.toLocaleString()} 件表示中)` : ""}
+      </div>
+
       {loading && entries.length === 0 && (
         <div className="settings-placeholder">読み込み中…</div>
       )}
 
-      {!loading && filtered.length === 0 && (
+      {!loading && entries.length === 0 && (
         <div className="settings-placeholder">
-          {q ? "該当する項目がありません" : "辞書がまだ空です"}
+          {debouncedQ ? "該当する項目がありません" : "辞書がまだ空です"}
         </div>
       )}
 
@@ -354,7 +417,7 @@ export default function DictionarySection() {
         </div>
       )}
 
-      {filtered.length > 0 && (
+      {entries.length > 0 && (
         <table className="dictionary-table">
           <thead>
             <tr>
@@ -365,7 +428,7 @@ export default function DictionarySection() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((e) => (
+            {entries.map((e) => (
               <DictionaryRow
                 key={e.id}
                 entry={e}
@@ -376,6 +439,10 @@ export default function DictionarySection() {
           </tbody>
         </table>
       )}
+
+      {/* 無限スクロール sentinel: 見えたら次ページを load */}
+      {hasMore && <div ref={sentinelRef} className="dictionary-sentinel" aria-hidden />}
+      {loadingMore && <div className="settings-placeholder">読み込み中…</div>}
     </div>
   );
 }
@@ -405,18 +472,28 @@ function DictionaryRow({
   return (
     <tr className={`dictionary-row ${entry.enabled ? "" : "dictionary-row-disabled"}`}>
       <td>
-        <input
-          name="dict-word"
-          type="text"
-          value={word}
-          onChange={(e) => setWord(e.target.value)}
-          onBlur={() => {
-            if (word.trim() && word !== entry.word) {
-              void onPatch({ word: word.trim() });
-            }
-          }}
-          className="dictionary-cell-input"
-        />
+        <div className="dictionary-word-cell">
+          <input
+            name="dict-word"
+            type="text"
+            value={word}
+            onChange={(e) => setWord(e.target.value)}
+            onBlur={() => {
+              if (word.trim() && word !== entry.word) {
+                void onPatch({ word: word.trim() });
+              }
+            }}
+            className="dictionary-cell-input"
+          />
+          {entry.source !== "user" && (
+            <span
+              className={`dictionary-source-badge dictionary-source-${entry.source}`}
+              title={`source: ${entry.source}`}
+            >
+              {entry.source}
+            </span>
+          )}
+        </div>
       </td>
       <td>
         <input

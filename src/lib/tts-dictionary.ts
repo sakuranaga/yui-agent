@@ -19,7 +19,23 @@ import { AhoCorasick } from "@monyone/aho-corasick/greedy";
 import { db } from "@/db/client";
 import { ttsDictionary } from "@/db/schema";
 
-export type Entry = { word: string; reading: string };
+export type Entry = { word: string; reading: string; source?: string };
+
+/**
+ * 同一 lowercase キーで衝突したときの優先度 (= 小さいほど優先)。
+ * user (= 手動キュレート) > preset (= 初期 seed) > cmudict (= 一括生成)。
+ * source 未指定 (= 合成 dict / テスト) は最優先扱い。
+ */
+function sourcePriority(source?: string): number {
+  switch (source) {
+    case "preset":
+      return 1;
+    case "cmudict":
+      return 2;
+    default:
+      return 0; // 'user' および未指定
+  }
+}
 
 /**
  * (entries, matcher, lookup) を同時生成した不変オブジェクト。
@@ -47,13 +63,23 @@ export function invalidateDictionaryCache(): void {
  */
 export function buildSnapshot(entries: Entry[]): Snapshot {
   const readingByWordLower = new Map<string, string>();
+  const priorityByWordLower = new Map<string, number>();
   const patterns: string[] = [];
   for (const e of entries) {
     if (!e.word) continue;
     const k = e.word.toLowerCase();
-    if (!readingByWordLower.has(k)) {
+    const pri = sourcePriority(e.source);
+    const existing = priorityByWordLower.get(k);
+    if (existing === undefined) {
       readingByWordLower.set(k, e.reading);
+      priorityByWordLower.set(k, pri);
       patterns.push(k);
+    } else if (pri < existing) {
+      // 高優先 (= user > preset > cmudict) が同一 lowercase キーの reading を奪う。
+      // 入力順に依存せず「ご主人様手動 > 一括生成」を常に保証する (= case 違いで
+      // "Claude"(user) と "claude"(cmudict) が共存しても user の読みが勝つ)。
+      readingByWordLower.set(k, e.reading);
+      priorityByWordLower.set(k, pri);
     }
   }
   const matcher = new AhoCorasick(patterns); // greedy 版 = leftmost-longest 自動
@@ -99,7 +125,11 @@ export async function loadDictionary(): Promise<Entry[]> {
   if (cache && now - cache.loadedAt < TTL_MS) return cache.entries;
   try {
     const rows = await db
-      .select({ word: ttsDictionary.word, reading: ttsDictionary.reading })
+      .select({
+        word: ttsDictionary.word,
+        reading: ttsDictionary.reading,
+        source: ttsDictionary.source,
+      })
       .from(ttsDictionary)
       .where(eq(ttsDictionary.enabled, true))
       .orderBy(asc(ttsDictionary.word));
@@ -189,6 +219,7 @@ export async function seedTtsDictionaryIfEmpty(): Promise<{
         word: p.word,
         reading: p.reading,
         enabled: true,
+        source: "preset",
       }))
     );
     invalidateDictionaryCache();

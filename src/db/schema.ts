@@ -1134,6 +1134,9 @@ export const ttsDictionary = pgTable("tts_dictionary", {
   word: text("word").notNull().unique(),
   reading: text("reading").notNull(),
   enabled: boolean("enabled").notNull().default(true),
+  // エントリの出所。'user' (= 手動 / ツール、最優先で保護) | 'preset' (= 初期 seed) |
+  // 'cmudict' (= e2k 一括生成、13 万件規模、一括管理対象)。migration 0067 参照。
+  source: text("source").notNull().default("user"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -770,3 +770,66 @@ Phase 1 で safety fallback を恒久維持するため、**「移行期 fallbac
   - `npm audit` で critical なし確認
 - Phase 1 / Phase 2 の commit message prefix: `Phase TR2.1` / `Phase TR2.2` (= 本書の v2 = TR2 ナンバリング)
 - ベンチ追加は別 commit (= ベンチデータの diff が肥大化する場合)
+
+---
+
+## 12. 英→カタカナ一括辞書 (= TR3、AC が必要になった理由)
+
+AC 化 (= §3) で 1 万〜10 万件規模に耐えられるようになったので、英単語の読みを **e2k で一括生成して 13 万件規模で DB 投入** する。これが「辞書 1 万件 +」の具体的な中身。
+
+### 12.1 出所管理 (= `source` 列、migration 0067)
+
+`tts_dictionary.source` で出所を区別 (= 巻き戻し性と手動キュレート保護):
+
+| source | 意味 | 衝突時 |
+|---|---|---|
+| `user` | 手動 / Yui ツール登録 | **最優先** (= bulk import で上書き禁止) |
+| `preset` | 初期 seed (`tts-dictionary-preset`) | user に劣後、cmudict に優先 |
+| `cmudict` | e2k 一括生成 (13 万件規模) | 最劣後、一括 disable/再生成/削除の対象 |
+
+優先度は **2 段で保証** する:
+1. **import 時**: `onConflictDoNothing(target: word)` で既存 word を絶対に上書きしない
+2. **AC snapshot 構築時**: `buildSnapshot` が同一 lowercase キーの衝突を `sourcePriority` で解決 (= case 違いで `Claude`(user) と `claude`(cmudict) が共存しても **user の読みが必ず勝つ**)
+
+### 12.2 生成 → 取り込みフロー
+
+```bash
+# 1. 生成 (host、deps: pip install e2k cmudict) — C2K は文字ベースなので g2p 不要
+python3 scripts/gen-katakana-dict.py            # → english_to_katakana_dict.csv
+
+# 2. コンテナに渡して取り込み (= source='cmudict'、batched、冪等)
+docker cp english_to_katakana_dict.csv yui-agent-web:/app/
+docker exec -w /app yui-agent-web npx tsx scripts/tts-dict-import.ts --reset
+```
+
+- `scripts/gen-katakana-dict.py`: CMUDict 見出し語を e2k `C2K` でカタカナ化、最小フィルタ (= a-z'、dedup、空除外)
+- `scripts/tts-dict-import.ts`: 1000 行/batch、`onConflictDoNothing`、`--reset` で cmudict 全削除→再投入
+
+### 12.3 検索 API / UI の 13 万件対応
+
+- `GET /api/tts-dictionary`: `q` / `limit` / `offset` / `source` でページング。ASCII クエリは `lower(word) LIKE 'q%'` (= `idx_tts_dictionary_lower_word` 使用)、かなは `reading ILIKE`。`count` 同梱
+- `DictionarySection.tsx`: 全件 load を廃止し、debounce サーバ検索 + IntersectionObserver 無限スクロール。編集/削除はローカル state 更新 (= スクロール位置維持)、source バッジ表示
+
+### 12.4 既知の残リスク (= 最小フィルタの帰結)
+
+短語・機能語 (`in/on/it/go`…) を残すため、**辞書に無い固有名詞での暴発** (= `Spotify` → `spot+if+y` 的な部分切り) が起き得る。`source` 優先で手動キュレートは守られるが、実運用で暴発が顕在化したら **「ASCII パターンのみ単語境界マッチ」** を次の安全弁にする (= v2 semantics への追加、本書スコープ外の follow-up)。
+
+### 12.5 実測 (= 2026-06-10、実 124,978 件 = cmudict 124,922 + user 56)
+
+e2k で生成した CMUDict 124,926 語を投入し (= 既存 user word と exact 衝突した 4 件は skip)、コンテナ内 (= web プロセスと同コード) で実測:
+
+| 項目 | 実測 | 備考 |
+|---|---|---|
+| cold load (= DB fetch + sort + 125k trie 構築) | **301 ms** | 60 秒 TTL に 1 回。§3.4 推定 ~500ms より速い |
+| hot path 置換 200 字 | 0.039 ms | fast path (= cache snapshot 再利用) |
+| **hot path 置換 500 字** | **0.095 ms** | **§4.1 hard line 50ms に対し約 500 倍の余裕** ✅ |
+| hot path 置換 2000 字 | 0.064 ms | |
+| hot path 置換 10000 字 | 0.287 ms | |
+| 検索 API (= prefix, 125k) | 9〜18 ms | `idx_tts_dictionary_lower_word` 使用 |
+| trie メモリ | heap +139MB / RSS 258MB | クリーンな probe プロセス実測 |
+
+メモリの注: §4.3 / 合成ベンチの「100k ≈ 424MB」は GC 前ゴミ込みの上振れ値で、**実測の真値は 125k で heap +139MB**。web の dev コンテナ全体は 3.5GB 超だがこれは Next dev モードのベースライン + HMR がほぼ全部で、trie は ~140MB。本番 (`next start`) ではベースラインが桁違いに小さく、trie 140MB が主コストになる。
+
+正しさ: `Claude と schedule と coffee` → `クロード と スケジュール と コーヒー` (= user の `Claude` が cmudict の `claude` に勝ち、cmudict の `schedule`/`coffee` も正読)。§12.1 の 2 段優先が実データで機能。
+
+= 合成ベンチ (§4、100k/500字 0.02ms) と実データ (125k/500字 0.095ms) は同オーダー。実データが僅かに高いのは英単語が実際に match するためで、体感はゼロ。**AC 設計は実データで裏取り完了**。

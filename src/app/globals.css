@@ -8105,6 +8105,37 @@ a.news-title:hover {
   outline: none !important;
 }
 
+.dictionary-count {
+  font-size: 12px;
+  color: rgba(45, 34, 56, 0.6);
+  padding: 2px 4px;
+}
+.dictionary-sentinel {
+  height: 1px;
+}
+.dictionary-word-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dictionary-source-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.dictionary-source-preset {
+  background: rgba(45, 34, 56, 0.08);
+  color: rgba(45, 34, 56, 0.62);
+}
+.dictionary-source-cmudict {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+
 .dictionary-table {
   width: 100%;
   border-collapse: separate;
