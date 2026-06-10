@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.40.1",
+    "@monyone/aho-corasick": "1.1.11",
     "@pixiv/three-vrm": "3.5.3",
     "@pixiv/three-vrm-animation": "3.5.3",
     "drizzle-orm": "0.45.2",

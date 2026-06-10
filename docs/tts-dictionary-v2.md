@@ -531,9 +531,11 @@ JOIN tts_dictionary b ON position(b.word in a.reading) > 0
 WHERE a.id != b.id AND a.enabled AND b.enabled;
 ```
 
-##### 検証 2: overlap 競合候補ペアの SQL 検出 (= ケース C)
+##### 検証 2: overlap 競合候補ペアの検出 (= ケース C)
 
-v1 / v2 で出力が変わり得るペアを heuristic で検出 (= 完全検出は text 次第のため不可能、確率的に怪しいペアをリストアップ):
+overlap 競合には **2 クラス** あり、両方を検出する。
+
+**2a: substring overlap (= 短 word が長 word の途中に含まれる)** — SQL で検出:
 
 ```sql
 -- 短い word が長い word の途中 (= 先頭以外) に substring として現れるペア
@@ -552,6 +554,13 @@ WHERE short.id != long.id
   AND length(short.word) < length(long.word)
   AND short.enabled AND long.enabled;
 ```
+
+**2b: suffix/prefix overlap (= A の末尾 k 文字 == B の先頭 k 文字)** — 2a では検出できない別クラス:
+
+- 例: `A=ab`, `B=bc` → text `"abc"` で A が `[0,2)`、B が `[1,3)` と範囲が重なる
+- v1 (= 逐次置換) は辞書順で先に当たった方が勝つ (= 順序依存)、v2 (= leftmost-longest) は左端の A を採用して B を捨てる → **同じ divergence クラス**
+- substring (= 2a) の SQL では「A は B の substring ではない」ため漏れる
+- SQL の substring join では表現しにくいので、**比較スクリプト側で読み込み済み辞書から JS で O(N²) 算出** する (`A.suffix(k) === B.prefix(k)` なペアから merge text を合成)。大規模辞書では scan / 生成件数に上限を設け、超過は log で明示 (= silent cap 禁止)。実装は `scripts/tts-dict-v1v2-compare.ts` の「検証 2b」を参照
 
 ##### 検証 3: 比較スクリプトで実 fixture を投入
 
@@ -585,7 +594,7 @@ WHERE short.id != long.id
 
 ### 4.2 ベンチコード
 
-`tools/tts-dict-bench.ts` (= §6.3 と同一スクリプト、standalone tsx) で実施:
+`scripts/tts-dict-bench.ts` (= §6.3 と同一スクリプト、standalone tsx) で実施:
 
 - 件数別 (= 50/1k/10k/50k/100k) × text 長別 (= 100/500/2000/10000 字)
 - warmup 3 round + measure 10 round、median を採用
@@ -627,7 +636,7 @@ test runner 本格導入は別 doc / 別 issue で扱う。
 
 ### 6.2 検証 1: v1/v2 比較スクリプト (= 回帰確認)
 
-`tools/tts-dict-v1v2-compare.ts` (新規) を tsx で実行。§3.6 の 3 段階検証 (= 連鎖置換 / overlap 競合 / case-insensitive 衝突) を **1 本のスクリプトに統合** して回帰確認する:
+`scripts/tts-dict-v1v2-compare.ts` (新規) を tsx で実行。§3.6 の 3 段階検証 (= 連鎖置換 / overlap 競合 / case-insensitive 衝突) を **1 本のスクリプトに統合** して回帰確認する:
 
 - **入力 (= 辞書)**: 現在の DB から取得した実辞書
 - **入力 (= text 集合)**: 以下を結合
@@ -640,7 +649,7 @@ test runner 本格導入は別 doc / 別 issue で扱う。
 - **期待**: 差分は §3.6 で「v2 の正しい挙動として受容」と決めたカテゴリのみ。それ以外の差分が出たらご主人様レビュー
 
 ```bash
-npx tsx tools/tts-dict-v1v2-compare.ts
+npx tsx scripts/tts-dict-v1v2-compare.ts
 # → "Compared 89 samples against 1234-entry dict:
 #     0 diffs (chain replacement category): all pre-cleaned by §3.6 検証1
 #     2 diffs (overlap category): v2 leftmost-longest 採用、ご主人様判断要
@@ -652,7 +661,7 @@ npx tsx tools/tts-dict-v1v2-compare.ts
 
 ### 6.3 検証 2: ベンチスクリプト (= 性能達成確認)
 
-`tools/tts-dict-bench.ts` (新規) を tsx で実行:
+`scripts/tts-dict-bench.ts` (新規) を tsx で実行:
 
 - 入力: 件数別の合成辞書 (= 50/1k/10k/50k/100k 件、word は ASCII 8-12 文字ランダム)
 - 入力: text 長別 (= 100/500/2000/10000 字、英語含む混在)
@@ -661,13 +670,13 @@ npx tsx tools/tts-dict-v1v2-compare.ts
 - 達成判定: §4.1 の hard line (= 100k 件 / 500 字 で ≤ 50ms) を満たすか
 
 ```bash
-npx tsx tools/tts-dict-bench.ts
+npx tsx scripts/tts-dict-bench.ts
 # → marddown table を stdout に出力
 ```
 
 ### 6.4 検証 3: エッジケース手動チェック
 
-以下のケースを `tools/tts-dict-v1v2-compare.ts` の fixture に含めて、出力を目視:
+以下のケースを `scripts/tts-dict-v1v2-compare.ts` の fixture に含めて、出力を目視:
 
 - leftmost-longest の解決 (= 「Apple」「Apple Music」両方登録、text に「Apple Music」)
 - case-insensitive (= 「apple」「APPLE」両方マッチ)
@@ -696,9 +705,9 @@ test runner (= Vitest 等) が後から導入されたら、§6.2-§6.4 のス�
 - **legacy 素朴 loop は `legacyLoopReplace()` として切り出し、safety fallback 用に恒久維持** (= 削除しない、§3.5.1)
 - **§3.6 の 3 段階 SQL チェック** で現辞書の差分リスクを洗い出す:
   - 検証 1 (= 連鎖置換、§3.6 検証 1): reading に他 word を含む entry を洗い出し、該当があれば編集 / 受容判断
-  - 検証 2 (= overlap 競合、§3.6 検証 2): 短 word が長 word の途中に現れるペアを洗い出し、候補リストとして比較スクリプトの fixture に流す
+  - 検証 2 (= overlap 競合、§3.6 検証 2): substring overlap (= 2a、短 word が長 word の途中) は SQL、suffix/prefix overlap (= 2b、A の末尾 k 文字 == B の先頭 k 文字) は比較スクリプトの JS で洗い出し、両クラスとも fixture に流す
   - 検証 3 (= case-insensitive 衝突、§3.3.1): `lower(word)` で重複する entry を洗い出し、片方を削除 / disable / word 変更でクリーンに
-- `tools/tts-dict-v1v2-compare.ts` (= §6.2) と `tools/tts-dict-bench.ts` (= §6.3) を新規作成
+- `scripts/tts-dict-v1v2-compare.ts` (= §6.2) と `scripts/tts-dict-bench.ts` (= §6.3) を新規作成
 - 動作確認: ご主人様の手元辞書 + 実 fixture で v1/v2 比較し、差分なし (= または §3.6 で受容済みカテゴリの差分のみと確認)、ベンチで §4.1 hard line 達成
 
 ### Phase 2 (= 将来、ベンチ regression 自動化と運用観測のみ)
