@@ -507,6 +507,7 @@ text: `"AIとIDLEは違う"`、辞書: `[AI=エーアイ, IDLE=アイドル]`
 1. **1-pass**: reading に他 word が再出現しても再置換しない (= ケース B の連鎖置換は発動しない)
 2. **leftmost-longest**: 位置が重なる match のうち、左端で始まる最長を採用する (= ケース C の overlap 競合は左端優先)
 3. **case-insensitive**: 自前 normalize layer で実現 (= §3.3.1)
+4. **ASCII 単語境界**: ASCII 英単語 pattern (= 先頭/末尾が `[a-z0-9']`) は、元 text 上で match の前後が ASCII word-char でないときのみ採用する (= 単語の途中での部分一致を弾く)。日本語 pattern は無条件採用。`asciiBoundaryOk` で実装、cmudict 13 万件投入後の暴発対策 (= §12.4。`Vaundy` → `フオーンドイー` のような辞書外固有名詞の分割置換を防ぐ)
 
 理由:
 
@@ -810,9 +811,27 @@ docker exec -w /app yui-agent-web npx tsx scripts/tts-dict-import.ts --reset
 - `GET /api/tts-dictionary`: `q` / `limit` / `offset` / `source` でページング。ASCII クエリは `lower(word) LIKE 'q%'` (= `idx_tts_dictionary_lower_word` 使用)、かなは `reading ILIKE`。`count` 同梱
 - `DictionarySection.tsx`: 全件 load を廃止し、debounce サーバ検索 + IntersectionObserver 無限スクロール。編集/削除はローカル state 更新 (= スクロール位置維持)、source バッジ表示
 
-### 12.4 既知の残リスク (= 最小フィルタの帰結)
+### 12.4 暴発対策: ASCII 単語境界マッチ (= 2026-06-10 導入済)
 
-短語・機能語 (`in/on/it/go`…) を残すため、**辞書に無い固有名詞での暴発** (= `Spotify` → `spot+if+y` 的な部分切り) が起き得る。`source` 優先で手動キュレートは守られるが、実運用で暴発が顕在化したら **「ASCII パターンのみ単語境界マッチ」** を次の安全弁にする (= v2 semantics への追加、本書スコープ外の follow-up)。
+最小フィルタで短語・機能語を残したため、投入直後に **辞書外固有名詞での暴発が実機で顕在化**:
+
+- `Vaundy『飛ぶ時』です` → **`フオーンドイー『飛ぶ時』です`** (= 非 cmudict 語 "Vaundy" 内の部分文字列が cmudict 語にマッチして分割置換された)
+
+対策として **ASCII 英単語 pattern は単語境界でのみ採用** する規則を `replaceWithSnapshot` に追加 (`asciiBoundaryOk`、§3.6 の semantics 規則 4):
+
+- keyword の先頭・末尾が ASCII word-char (`[a-z0-9']`) のとき、元 text 上で match の前後が ASCII word-char でない (= 単語の途中でない) ことを要求
+- 日本語 pattern (= 端が非 ASCII) は無条件採用 (= 単語境界の概念がない)
+
+結果 (実機確認):
+
+| 入力 | 修正前 | 修正後 |
+|---|---|---|
+| `Vaundy『飛ぶ時』` | フオーンドイー『飛ぶ時』 | **Vaundy『飛ぶ時』** (= 不変、Irodori が読む) |
+| `Apple Music で schedule を確認` | (変わらず正しい) | **アップルミュージック で スケジュール を確認** |
+| `schedulex` (= 辞書外) | スケジュールx | **schedulex** (= 不変) |
+| `3Dモデル` `iOSアプリ` | (正しい) | **スリーディーモデル / アイオーエスアプリ** (= 直後が非 ASCII なので境界 OK) |
+
+注: 本書 §3.6 / 合成ベンチの 502 とは無関係。投入直後の 502 は **cold trie 構築 (= 125k、~330ms) と Next dev 再コンパイルが重なった一過性**で、Irodori upstream は mangled text でも 200 を返す (= TTS エンジン側の問題ではない) ことを実機で確認済み。
 
 ### 12.5 実測 (= 2026-06-10、実 124,978 件 = cmudict 124,922 + user 56)
 

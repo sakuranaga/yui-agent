@@ -86,6 +86,29 @@ export function buildSnapshot(entries: Entry[]): Snapshot {
   return { entries, matcher, readingByWordLower };
 }
 
+// ASCII 英数字 + アポストロフィ (= cmudict 由来語の構成文字)。単語境界判定に使う。
+const ASCII_WORD_CHAR = /[a-z0-9']/i;
+
+/**
+ * ASCII 英単語 pattern は「単語境界」でのみ採用する (= 暴発防止)。
+ * keyword の先頭・末尾が ASCII word-char のとき、元 text 上で match の前後が
+ * ASCII word-char でない (= 単語の途中ではない) ことを確認する。
+ * 例: "Vaundy" (= 非辞書の固有名詞) の中の cmudict 部分文字列マッチを弾き、
+ *     "Vaundy" → "フオーンドイー" のような暴発を防ぐ。
+ * 日本語 pattern (= 先頭/末尾が非 ASCII) は単語境界の概念がないので無条件採用。
+ * 13 万件規模で英単語が増えると、辞書外の固有名詞内で部分一致する確率が上がるため必須。
+ */
+function asciiBoundaryOk(text: string, begin: number, end: number, keyword: string): boolean {
+  const first = keyword[0];
+  const last = keyword[keyword.length - 1];
+  if (!ASCII_WORD_CHAR.test(first) || !ASCII_WORD_CHAR.test(last)) return true; // 端が非 ASCII = 対象外
+  const prev = begin > 0 ? text[begin - 1] : "";
+  const next = end < text.length ? text[end] : "";
+  if (prev && ASCII_WORD_CHAR.test(prev)) return false; // 直前が英数字 = 単語の途中
+  if (next && ASCII_WORD_CHAR.test(next)) return false; // 直後が英数字 = 単語の途中
+  return true;
+}
+
 /**
  * matchInText の結果から置換後文字列を組み立てる。
  * begin/end は lowercase 済 text に対する index だが、toLowerCase が長さを保つ限り
@@ -111,6 +134,7 @@ export function replaceWithSnapshot(text: string, snap: Snapshot): string {
   let cursor = 0;
   for (const m of matches) {
     if (m.begin < cursor) continue; // 非重複前提だが念のためのガード
+    if (!asciiBoundaryOk(text, m.begin, m.end, m.keyword)) continue; // ASCII 単語の途中 → skip (= 暴発防止)
     out.push(text.slice(cursor, m.begin)); // 元 text (= case 保持) から切り出し
     const reading = snap.readingByWordLower.get(m.keyword);
     out.push(reading ?? text.slice(m.begin, m.end));
