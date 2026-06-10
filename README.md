@@ -136,6 +136,27 @@ Yui Agent の体験で最も差別化されるのは **「結衣の声」** で�
 
 このリポジトリには `assets/tts-refs/cool_seed_7777.wav` (= 通常会話用) と `whisper_ref.wav` (= 睡眠サポート用) が同梱されています。Irodori TTS の Voice Design 出力 (= 純合成、実在人物の声には基づかない、MIT モデル経由) なので、そのまま TTS サーバにコピーして使えます。詳細: [`CREDITS.md`](CREDITS.md)。
 
+### 英単語の読みを底上げ (= 任意、英→カタカナ一括辞書)
+
+TTS エンジンは英単語の発音が苦手なことがあります。Yui は発話直前に **読み方辞書** (= 設定 →「読み方」タブ) で `word → 読み` を置換してから合成するので、ここに英単語の読みを入れておくと発音が安定します。
+
+手動登録 (= タブで追加、または「`◯◯ は △△ って読んでね`」とチャットで教えると Yui が自分で登録) に加えて、**英単語の読みを一括生成して流し込む**スクリプトを同梱しています (= [e2k](https://github.com/Patchethium/e2k) で CMUDict の約 12 万語を英→カタカナ変換)。
+
+```bash
+# 1. 生成 (host、Python。プロジェクト依存ではないオフラインツール)
+pip install e2k cmudict
+python3 scripts/gen-katakana-dict.py            # → english_to_katakana_dict.csv
+
+# 2. DB に流し込み (container、source='cmudict' で投入)
+docker cp english_to_katakana_dict.csv yui-agent-web:/app/
+docker exec -w /app yui-agent-web npx tsx scripts/tts-dict-import.ts --reset
+```
+
+- **手動登録が常に最優先**: 一括辞書 (`cmudict`) は手動 (`user`) を上書きしません。気になる読みはタブで上書きすれば必ず勝ちます
+- **可逆**: `--reset` で一括辞書だけ削除→再生成。手動登録には触れません
+- **暴発対策込み**: ASCII 英単語は単語境界でのみ置換するので、辞書外の固有名詞 (= 例: `Vaundy`) が分割置換されません
+- 内部は Aho-Corasick なので 12 万件でも置換は 1 ターン 0.1ms 未満。設計と実測: [`docs/tts-dictionary-v2.md`](docs/tts-dictionary-v2.md)
+
 ---
 
 ## 技術スタック
@@ -175,6 +196,7 @@ Yui Agent の体験で最も差別化されるのは **「結衣の声」** で�
 - [`docs/news-curation.md`](docs/news-curation.md) — ニュースキュレーション
 - [`docs/health-tracking.md`](docs/health-tracking.md) — ヘルス全 Phase + iOS Shortcut
 - [`docs/sleep-support.md`](docs/sleep-support.md) — 認知シャッフル睡眠サポート
+- [`docs/tts-dictionary-v2.md`](docs/tts-dictionary-v2.md) — TTS 読み方辞書 (= Aho-Corasick + 英→カタカナ一括辞書)
 - [`docs/ai-settings.md`](docs/ai-settings.md) — Multi-provider AI 設定
 - [`docs/health-goals.md`](docs/health-goals.md) — ヘルス目標
 - [`docs/affinity-system.md`](docs/affinity-system.md) — 好感度 (= 設計のみ)
