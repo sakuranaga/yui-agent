@@ -69,23 +69,44 @@ export async function POST(req: NextRequest) {
   if (!ct.includes("multipart/form-data")) {
     return NextResponse.json({ error: "multipart/form-data required" }, { status: 400 });
   }
-  const form = await req.formData();
+  // body が proxyClientMaxBodySize (= next.config.ts、70MB) を超えると proxy 層で
+  // 本文が切り詰められ、multipart parse がここで throw する。素の 500 にせず、
+  // サイズ超過として 413 を返す (= 壊れた multipart でも同様だが実害の大半はサイズ超過)。
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch (e) {
+    console.warn(
+      "[vrm/models] formData parse failed (likely body exceeded proxyClientMaxBodySize):",
+      e instanceof Error ? e.message : String(e)
+    );
+    return NextResponse.json(
+      {
+        error: `ファイルが大きすぎてアップロードできませんでした (VRM は ${MAX_VRM_BYTES / 1024 / 1024}MB まで)`,
+      },
+      { status: 413 }
+    );
+  }
   const file = form.get("file");
   const name = (form.get("name") as string | null)?.trim();
   const thumb = form.get("thumb");
 
   if (!(file instanceof File)) {
-    return NextResponse.json({ error: "file required" }, { status: 400 });
+    return NextResponse.json({ error: "ファイルが選択されていません" }, { status: 400 });
   }
   if (file.size > MAX_VRM_BYTES) {
     return NextResponse.json(
-      { error: `vrm too large (${file.size} > ${MAX_VRM_BYTES})` },
+      {
+        error: `VRM が大きすぎます (${(file.size / 1024 / 1024).toFixed(1)}MB / 上限 ${MAX_VRM_BYTES / 1024 / 1024}MB)`,
+      },
       { status: 413 }
     );
   }
   if (thumb instanceof File && thumb.size > MAX_THUMB_BYTES) {
     return NextResponse.json(
-      { error: `thumb too large (${thumb.size} > ${MAX_THUMB_BYTES})` },
+      {
+        error: `サムネイルが大きすぎます (${(thumb.size / 1024 / 1024).toFixed(1)}MB / 上限 ${MAX_THUMB_BYTES / 1024 / 1024}MB)`,
+      },
       { status: 413 }
     );
   }

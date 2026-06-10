@@ -61,6 +61,15 @@ export default function VrmGallerySection() {
   }, [reload]);
 
   const handleUpload = async (file: File) => {
+    // サーバの MAX_VRM_BYTES (= 60MB) と揃えた事前チェック。アップロード前に即フィードバック。
+    const MAX_VRM_MB = 60;
+    if (file.size > MAX_VRM_MB * 1024 * 1024) {
+      alert(
+        `VRM が大きすぎます (${(file.size / 1024 / 1024).toFixed(1)}MB)。${MAX_VRM_MB}MB までにしてください。`
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
     setUploading(true);
     setProgress("サムネ生成中…");
     try {
@@ -77,8 +86,15 @@ export default function VrmGallerySection() {
       if (thumb) form.append("thumb", thumb, `${file.name}.png`);
       const res = await fetch("/api/vrm/models", { method: "POST", body: form });
       if (!res.ok) {
-        const err = await res.text().catch(() => "");
-        throw new Error(`upload failed: ${res.status} ${err}`);
+        // サーバの { error } を取り出してそのまま見せる (= 413 のサイズ超過メッセージ等)。
+        let msg = `アップロードに失敗しました (${res.status})`;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j?.error) msg = j.error;
+        } catch {
+          /* JSON でなければ status のみ */
+        }
+        throw new Error(msg);
       }
       await reload();
     } catch (e) {
