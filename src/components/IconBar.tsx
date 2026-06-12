@@ -39,6 +39,8 @@ type Props = {
   onOpenReminders?: () => void;
   /** PROJ ボタンが押されたときに親で呼ぶ (modal 開く) */
   onOpenProjects?: () => void;
+  /** NOTES ボタンが押されたときに親で呼ぶ (modal 開く) */
+  onOpenNotes?: () => void;
 };
 
 // MUTE はヘッダーの「全体ミュート」ボタン。Yui 声 + 音楽の両方を同時に on/off する。
@@ -53,7 +55,7 @@ const PRE_MUTE_MUSIC_KEY = "vroid-pre-mute-music-volume";
 
 type ToastMsg = { id: number; text: string };
 
-export default function IconBar({ onOpenSettings, onOpenMusic, onOpenLog, onOpenTodo, onOpenContacts, onOpenDiary, onOpenNews, onOpenCalendar, onOpenMail, onOpenSleep, onOpenHealth, onOpenReminders, onOpenProjects }: Props) {
+export default function IconBar({ onOpenSettings, onOpenMusic, onOpenLog, onOpenTodo, onOpenContacts, onOpenDiary, onOpenNews, onOpenCalendar, onOpenMail, onOpenSleep, onOpenHealth, onOpenReminders, onOpenProjects, onOpenNotes }: Props) {
   const [muted, setMuted] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMsg[]>([]);
   const [mounted, setMounted] = useState(false);
@@ -340,6 +342,18 @@ export default function IconBar({ onOpenSettings, onOpenMusic, onOpenLog, onOpen
           <button
             type="button"
             className="icon-bar-btn"
+            onClick={() => onOpenNotes?.()}
+            aria-label="ノート"
+            title="ノート"
+          >
+            <NotesIcon />
+          </button>
+          <span className="icon-bar-label">NOTES</span>
+        </div>
+        <div className="icon-bar-item">
+          <button
+            type="button"
+            className="icon-bar-btn"
             onClick={() => onOpenCalendar?.()}
             aria-label="カレンダー"
             title="カレンダー"
@@ -531,6 +545,22 @@ function ProjectsIcon() {
       <rect x="14" y="3" width="7" height="7" rx="1.5" />
       <rect x="3" y="14" width="7" height="7" rx="1.5" />
       <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </svg>
+  );
+}
+
+function NotesIcon() {
+  // lucide 風 notebook-pen (ノート + ペン) でメモ/ノートを表現
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 6h4" />
+      <path d="M2 10h4" />
+      <path d="M2 14h4" />
+      <path d="M2 18h4" />
+      <rect width="16" height="20" x="4" y="2" rx="2" />
+      <path d="M9.5 8h5" />
+      <path d="M9.5 12H16" />
+      <path d="M9.5 16H14" />
     </svg>
   );
 }

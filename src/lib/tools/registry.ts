@@ -90,6 +90,8 @@ import { listMorningBriefs } from "./brief/list_morning_briefs";
 
 // dict (= TTS 読み方辞書、自律学習)
 import { addPronunciation } from "./dict/add_pronunciation";
+import { saveNote } from "./note/save_note";
+import { searchNotes } from "./note/search_notes";
 
 // music — main 直接 transport (= ask_music_specialist 経由しない)
 import { musicPause } from "./music/music_pause";
@@ -137,6 +139,8 @@ export const ALL_TOOLS: ToolDef[] = [
   getMorningBrief, listMorningBriefs,
   // dict (= TTS 読み方辞書、自律学習)
   addPronunciation,
+  // note (ノート空間)
+  saveNote, searchNotes,
   // music (direct transport, main)
   musicPause, musicResume, musicNext, musicPrev, musicVolume, musicNowPlaying,
   // music (specialist 内部)

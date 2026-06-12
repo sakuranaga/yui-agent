@@ -20,6 +20,7 @@ import MailComposeModal, { type ComposeMode } from "@/components/MailComposeModa
 import SleepModal from "@/components/SleepModal";
 import HealthModal from "@/components/HealthModal";
 import RemindersModal from "@/components/RemindersModal";
+import NotesModal from "@/components/NotesModal";
 import SpotifyWebPlayer from "@/components/SpotifyWebPlayer";
 import SleepOverlay from "@/components/SleepOverlay";
 import ProjectHubModal from "@/components/ProjectHubModal";
@@ -150,6 +151,7 @@ export default function Home() {
   const [healthOpen, setHealthOpen] = useState(false);
   const [remindersOpen, setRemindersOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   // Hub からのジャンプ要求: 該当 modal を開く + project filter を pre-set。
   // 受信した event.detail.projectName を該当 modal に prop で流す。
   const [todoPresetProject, setTodoPresetProject] = useState<string | null>(null);
@@ -535,6 +537,7 @@ export default function Home() {
           onOpenHealth={() => setHealthOpen(true)}
           onOpenReminders={() => setRemindersOpen(true)}
           onOpenProjects={() => setProjectsOpen(true)}
+          onOpenNotes={() => setNotesOpen(true)}
         />
         <ReportPanel reports={reports} />
         {sessionId && (
@@ -607,6 +610,7 @@ export default function Home() {
       )}
       <SleepOverlay />
       <ProjectHubModal open={projectsOpen} onClose={() => setProjectsOpen(false)} />
+      <NotesModal open={notesOpen} onClose={() => setNotesOpen(false)} />
       <MailComposeModal
         open={externalCompose !== null}
         mode={externalCompose}

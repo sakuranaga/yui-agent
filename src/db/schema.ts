@@ -525,6 +525,43 @@ export type DiaryEntry = typeof diaryEntries.$inferSelect;
 export type NewDiaryEntry = typeof diaryEntries.$inferInsert;
 
 /**
+ * Yui ノート空間 (docs/yui-notes.md)。markdown ノート + chunk 分割 embedding。
+ * memory_chunks (= 会話記憶) とは別系統。HNSW / FTS index は migration 0068 の生 SQL。
+ */
+export const notes = pgTable("notes", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  title: text("title").notNull().default(""),
+  bodyMd: text("body_md").notNull(),
+  // 'human'|'doc_agent'|'deep_research'|'mcp'|'tool_report'|'project_note'
+  source: text("source").notNull().default("human"),
+  // project 紐付けは project_links (M:N, artifact_type='memo') を使う (docs/yui-notes.md §14.2)。
+  pinned: boolean("pinned").notNull().default(false),
+  archived: boolean("archived").notNull().default(false),
+  sourceMeta: jsonb("source_meta").$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type Note = typeof notes.$inferSelect;
+export type NewNote = typeof notes.$inferInsert;
+
+/**
+ * ノート本文の chunk 分割 embedding (= 意味検索の本体)。
+ * UNIQUE(note_id, chunk_index) と HNSW index は migration 0068 の生 SQL 側で定義
+ * (= 既存 memory_chunks と同じく drizzle schema には index/constraint を載せない方針)。
+ */
+export const noteChunks = pgTable("note_chunks", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  noteId: bigint("note_id", { mode: "number" })
+    .notNull()
+    .references(() => notes.id, { onDelete: "cascade" }),
+  chunkIndex: integer("chunk_index").notNull(),
+  content: text("content").notNull(),
+  embedding: vector("embedding", { dimensions: 1024 }).notNull(),
+});
+export type NoteChunk = typeof noteChunks.$inferSelect;
+export type NewNoteChunk = typeof noteChunks.$inferInsert;
+
+/**
  * ご主人様プロファイル スナップショット (docs/user-profile-snapshot.md)。
  * 日記 (= 結衣の主観・内面) とは完全に別レコード。
  * 1 日 1 件、データ駆動の客観アセスメント。

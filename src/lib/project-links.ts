@@ -255,6 +255,13 @@ export async function cleanupOrphanLinks(): Promise<{ removed: number }> {
       AND artifact_id::bigint NOT IN (SELECT id FROM contacts)
   `);
   removed += (r2 as unknown as { rowCount?: number }).rowCount ?? 0;
-  // mail / event / memo はそれぞれの本体テーブル定義時に追加 (現状は外部 ID を持つので skip)
+  // memo (= notes テーブル。deleteNote が同 transaction で消すのが本筋、これは保険)
+  const r3 = await db.execute(sql`
+    DELETE FROM project_links
+    WHERE artifact_type = 'memo'
+      AND artifact_id::bigint NOT IN (SELECT id FROM notes)
+  `);
+  removed += (r3 as unknown as { rowCount?: number }).rowCount ?? 0;
+  // mail / event は外部 ID を持つので skip
   return { removed };
 }

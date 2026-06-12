@@ -25,7 +25,8 @@ export type ToolMode =
 export type ToolDomain =
   | "mail" | "schedule" | "todo" | "contact" | "music" | "web"
   | "memory" | "vrm" | "health" | "diary" | "status" | "news" | "timer" | "reminder" | "brief" | "project"
-  | "dict"; // TTS 読み方辞書 (= 結衣が読み間違いを訂正された時の自律学習)
+  | "dict" // TTS 読み方辞書 (= 結衣が読み間違いを訂正された時の自律学習)
+  | "note"; // ノート空間 (= markdown メモ / 知識層、docs/yui-notes.md)
 
 export type SpecialistId = "mail" | "schedule" | "music" | "report";
 
