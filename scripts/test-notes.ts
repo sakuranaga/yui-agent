@@ -17,6 +17,9 @@ import {
   queryNotes,
   updateNote,
 } from "@/lib/notes";
+import { saveNote } from "@/lib/tools/note/save_note";
+import { subscribeSession, type ServerEvent } from "@/lib/jobs/events";
+import type { ToolContext } from "@/lib/tools/types";
 
 let passed = 0;
 const failures: string[] = [];
@@ -123,6 +126,56 @@ async function main() {
       check(after[0]?.c === 0, "削除後: memo link も消える (= orphan 防止)");
     } else {
       console.log("  ⚠ projects 無し → orphan cleanup テスト skip");
+    }
+
+    // --- 10. save_note tool → report_update event (§6, N2) ---
+    console.log("[10] save_note → report_update push");
+    const sessionId = `test-notes-${passed}`;
+    const events: ServerEvent[] = [];
+    const unsub = subscribeSession(sessionId, (e) => events.push(e));
+    try {
+      const ctx = {
+        sessionId,
+        caller: { kind: "main" },
+        mode: "normal",
+        userUtterance: null,
+        availabilityCache: new Map(),
+      } as ToolContext;
+      const body = "# N2 テスト\n\nレポートパネル live 表示の確認。";
+      const out = (await saveNote.handler({ body_md: body }, ctx)) as {
+        ok: boolean;
+        id: number;
+        title: string;
+      };
+      check(out.ok === true && out.id > 0, "save_note 成功");
+      created.push(out.id);
+      const ru = events.find((e) => e.type === "report_update");
+      check(ru !== undefined, "report_update イベントが push される");
+      if (ru && ru.type === "report_update") {
+        check(ru.noteId === out.id, `report_update.noteId = 保存ノート id (${ru.noteId})`);
+        check(ru.markdown === body, "report_update.markdown = 保存本文そのまま");
+        check(ru.title === out.title, `report_update.title = ノート title ("${ru.title}")`);
+      }
+    } finally {
+      unsub();
+    }
+
+    // --- 11. save_note は購読者ゼロでも tool 自体は成功する (push 失敗耐性) ---
+    console.log("[11] save_note は購読者ゼロでも成功");
+    {
+      const ctx = {
+        sessionId: "test-notes-no-subscriber",
+        caller: { kind: "main" },
+        mode: "normal",
+        userUtterance: null,
+        availabilityCache: new Map(),
+      } as ToolContext;
+      const out = (await saveNote.handler({ body_md: "購読者なし live 表示テスト" }, ctx)) as {
+        ok: boolean;
+        id: number;
+      };
+      check(out.ok === true && out.id > 0, "購読者ゼロでも save_note 成功");
+      created.push(out.id);
     }
   } finally {
     // cleanup (= テスト失敗時に残ったノートを掃除)

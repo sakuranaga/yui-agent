@@ -213,20 +213,108 @@ export async function queryNotes(opts: {
 
 ---
 
-## 6. ReportPanel 永続化移行 (= キモの一手)
+## 6. save_note → ReportPanel live 表示 (= N2、確定仕様 2026-06-13)
+
+### 6.0 仕様確定の経緯 (= 重要)
+
+当初本節は「ReportPanel 永続化移行」(= `report_update` に persist フラグを足し全 producer の速報を `notes` へ自動 insert、履歴を notes から取得) を構想していた。**この案はご主人様と仕様を詰めた結果、却下された**。理由は:
+
+- ノートは `save_note` (= N1 の `createNote`) で**既に `notes` に永続化済み**。ReportPanel への表示で**もう一度保存するのは二重保存**。
+- 全 producer の速報を無差別に `notes` へ流すと、短命な一覧 (list_todos 等) までノート空間を汚す。
+- ご主人様の本意は「**ゆいがチャットでメモを登録したら、その登録済みノートを ReportPanel にも live で見せて」だけ**。永続化は不要 (= save_note 側で完了済み)。
+
+→ よって N2 は**永続化移行ではなく、save_note 実行時の ReportPanel live 表示 + クリックで NotesModal を開く**に縮小する。`emitReportUpdate` 等の persist ヘルパは**作らない**。`morning_brief` / `dispatcher` 等の既存 `report_update` も**従来どおり live のみ** (= 一切いじらない)。
 
 ### 6.1 現状
 
-ツールが `pushToSession({type:"report_update", ...})` を SSE で送り、`page.tsx` が in-memory 10 件保持 → ReportPanel が表示。**永続化なし**。
+ツールが `pushToSession({type:"report_update", title, markdown})` を SSE で送り、`ChatPanel` の `report_update` listener が `onReportUpdate(title, markdown)` → `page.tsx` の `handleReportUpdate` が in-memory 10 件保持 → `ReportPanel` が速報表示。**永続化なし** (= この挙動は変えない)。`ReportUpdateEvent` (`src/lib/jobs/events.ts`) は `{type, jobId, title, markdown, specialistId?}`。
 
-### 6.2 移行設計
+### 6.2 N2 で作るもの (= 確定スコープ)
 
-現状の `ReportUpdateEvent` (`src/lib/jobs/events.ts`) は `{type, jobId, title, markdown, specialistId?}` で **`persist` も `source` も持たない**。ChatPanel → page.tsx は title/markdown/specialistId だけを読んで in-memory 10 件に積む。移行は型変更 + producer 棚卸しを伴うので段階的に:
+**トリガーは `save_note` ツール経由のみ** (= ご主人様がチャットで「メモして」と言い、ゆいが登録するケース)。NotesModal で**手動作成したノートは対象外** (= モーダルで既に見えているので速報不要)。
 
-1. **型拡張**: `ReportUpdateEvent` に `persist?: boolean` と `source?: NoteSource` を追加。
-2. **保存責務を 1 か所に集約**: 各 producer (= morning brief / Deep Research / list_todos 等) に insert を散らさず、`report_update` を送るサーバ側ヘルパ `emitReportUpdate({ ..., persist, source })` を新設し、`persist:true` のときだけ**そのヘルパ内で `notes` へ insert** (= 重複保存と insert 漏れを防ぐ)。
-3. **持続対象の棚卸し**: 残す価値があるもの (= Deep Research / Doc Agent / morning brief 等) を `persist:true`、短命な一覧系 (= list_todos / list_contacts 等) は従来どおり速報のみ (`persist` 省略)。どのツールを persist にするかは実装時に列挙して確定。
-4. **ReportPanel は速報ビューのまま** (= UX 不変)。ただし「履歴」ナビ (←/→) の取得元を in-memory から **`notes` (= persist 済みのもの) の取得 API** に切替え、恒久履歴を辿れるようにする。
+1. **`ReportUpdateEvent` に `noteId?: number` を追加** (`src/lib/jobs/events.ts`)。クリックで開く対象ノートの id を運ぶ。既存 producer は `noteId` を付けないので影響なし (= optional)。SSE は `JSON.stringify(event)` で丸ごと送るため、型追加だけで透過的に流れる。
+2. **`save_note` ハンドラを変更** (`src/lib/tools/note/save_note.ts`): handler が `ctx` を受け取り、`createNote` 成功後に
+   ```ts
+   pushToSession(ctx.sessionId, {
+     type: "report_update",
+     jobId: Date.now(),
+     title: note.title,       // createNote が deriveTitle で常に非空 (空なら "無題のメモ")
+     markdown: bodyMd,        // 保存した本文をそのまま
+     noteId: note.id,
+   });
+   ```
+   を try/catch で送出 (= push 失敗で tool 自体は失敗させない。`get_morning_brief` と同じ防御)。`createNote` の返り値は `NoteDetail` (`{id, title, …, bodyMd}`) で `title` は常に非空。tool の返り値は従来どおり `{ok, id, title}`。
+3. **表示は タイトル + 本文** (= ご主人様確定)。ReportPanel のタイトルタブに `note.title`、本文に `bodyMd` の markdown。
+4. **ReportPanel のタイトルタブをクリック → 当該ノートを NotesModal で開く** (= ご主人様確定の「クリックで当該メモをモーダル表示」を、クリック対象 = **タイトルタブ**に確定)。`noteId` を持つ report のみクリック可能。
+   - **クリック対象をタイトルタブに限定する理由**: report 本文は markdown を描画し、ニュース等の**外部リンク `<a>` を含みうる** (`ReportPanel.tsx` の `a` コンポーネント、外部は別タブで開く)。エントリ全体をクリック対象にすると本文中リンクのクリックと**競合**する。タイトルタブはリンクを含まない離散要素なので、ここを唯一のクリック対象にするのが安全。
+
+### 6.3 クリック → NotesModal 連携の配線
+
+`noteId` を SSE → ChatPanel → page.tsx → ReportPanel まで通し、タイトルタブのクリックで NotesModal を該当ノートで開く:
+
+1. **`Report` 型** (`src/components/ReportPanel.tsx`) に `noteId?: number` を追加。
+2. **`ChatPanel` の `report_update` listener**: parse 時に `noteId` も読み、`onReportUpdate(title, markdown, noteId)` に渡す (= 引数追加、後方互換で optional)。
+3. **`page.tsx`**:
+   - `handleReportUpdate(title, markdown, noteId?)` が `noteId` を `Report` に格納。
+   - ReportPanel に `onOpenNote(noteId)` コールバックを渡す。中身は `setFocusNoteId(noteId)` + `setNotesOpen(true)`。
+   - `focusNoteId` state を新設し NotesModal に渡す。NotesModal が消費したら `onFocusConsumed()` で null に戻す (= 再オープン時に誤フォーカスしない)。
+4. **`ReportPanel`**: prop `onOpenNote?: (noteId: number) => void` を追加。`current.noteId` がある時だけタイトルタブを button 化し (= lucide 風「開く」アイコン付き)、クリックで `onOpenNote(current.noteId)`。`noteId` 無し (= 既存 producer の速報) は従来の非クリック `<div>` 表示のまま (= 後方互換)。
+5. **`NotesModal`**: prop `focusNoteId?: number | null` + `onFocusConsumed?: () => void` を追加。`open && focusNoteId != null` になったら `select(focusNoteId)` で右ペインに該当ノートを表示 (= 既存の `select(id)` を流用。`/api/notes/{id}` を直接引くので一覧の load 状態に依存しない)。select 発火後に `onFocusConsumed()` を呼んで親の `focusNoteId` を null に戻す。
+
+**6.3.1 debounce リセット effect との競合対策 (= Codex 指摘 #1 への対応):**
+
+NotesModal は `q` を 250ms debounce して `debouncedQ` を更新し (`NotesModal.tsx:88-92`)、`[debouncedQ, source]` の effect が選択・detail・編集状態を**無条件でクリア**する (`NotesModal.tsx:142-149`)。これは `select` の seq ガード (`NotesModal.tsx:191-207`) の**外側**にある。「effect 宣言順で select を後に置けば勝つ」のは**同一 render commit 内の effect 順**の話にすぎず、フォーカス select 後に**遅延 debounce が別 commit で発火**すると reset effect が走り、せっかく開いた右ペインが空になる競合が残る (= フォーカス時に検索欄へ pending debounce が残っているケース)。
+
+対策は **reset effect の分離 + value token ガード**。現状の単一 `[debouncedQ, source]` effect は「検索語の reset」と「source の reset」の 2 責務を兼ねており、token で丸ごと skip すると**遅延 debounce 着地と source 変更が(理論上)同 commit に来た時に source 変更まで飲み込む**穴が残る (= Codex 指摘 #1 の深掘り)。そこで reset effect を **`[debouncedQ]` 用と `[source]` 用に分け**、token skip は **`debouncedQ` 側だけ**に適用する。これで「どの dep が変わって走ったか」の曖昧さが消える (= 各 effect は単一 dep)。
+
+- `focusSkipTokenRef` (`useRef<string | null>(null)`) を新設。
+- フォーカス select を適用する時 (= 上記 5 の `select(focusNoteId)` 呼び出し時) に、**pending debounce がある時だけ** token を立てる。pending debounce は将来 `debouncedQ` を `q.trim()` にする (`NotesModal.tsx:88-92`) ので、その**着地予定値**を token に保存:
+  ```ts
+  const trimmed = q.trim();
+  if (trimmed !== debouncedQ) focusSkipTokenRef.current = trimmed; // 着地予定値を記録
+  void select(focusNoteId);
+  ```
+- **検索語 reset (token-skippable)** — `debouncedQ` のみ依存:
+  ```ts
+  useEffect(() => {
+    const skip = focusSkipTokenRef.current;
+    focusSkipTokenRef.current = null;                  // token は次の 1 回で使い切る
+    if (skip !== null && debouncedQ === skip) return;  // 遅延 debounce 着地による spurious reset のみ skip
+    setSelectedId(null); setDetail(null); setEditing(false); setCreating(false);
+  }, [debouncedQ]);
+  ```
+- **source reset (常にクリア、skip 不可)** — `source` のみ依存:
+  ```ts
+  useEffect(() => {
+    focusSkipTokenRef.current = null;                  // source 変更時は古い token を捨てる
+    setSelectedId(null); setDetail(null); setEditing(false); setCreating(false);
+  }, [source]);
+  ```
+
+この分離 + token により:
+- `source` 変更は**常に**専用 effect でクリアされ、token の影響を一切受けない (= 飲み込みの穴が原理的に消える。両 dep が同 commit で変わっても、各 effect が独立に走り source 側は必ずクリア)。
+- pending debounce が無い通常ケースでは token を立てない → skip ゼロ・副作用ゼロ。
+- 遅延 debounce が**そのまま着地** (`debouncedQ === 着地予定値`) した時だけ検索語 effect で skip → フォーカスした右ペインを保持。
+- フォーカス後にユーザーが追加入力 → debounce が新値を coalesce、`debouncedQ` は別値で着地 → token 不一致 → **skip されず正当にクリア**。
+- 「source 変更が先に来て token を使い切る」場合も、source effect が token を捨て正当にクリア。後から debounce が着地しても token は null なので no-op (既にクリア済み)。
+
+注: 分離前の単一 effect と挙動が変わるのは「token skip の対象を `debouncedQ` 変化のみに限定した」点だけ。mount 時に両 effect が走り selectedId を null にするのは分離前と同じ (= 初期 null の no-op)。
+
+**6.3.2 in-flight select の失効 (= 実装レビューで判明した pre-existing race の修正):**
+
+`select()` は `selectSeqRef` で古い detail fetch を破棄するが、seq を進めるのは**次の `select()` 呼び出し時だけ**。filter reset は `selectedId/detail` をクリアするが seq を進めないため、reset 後に**先に発火していた `select()` の fetch が resolve すると `setDetail` で右ペインが復活**する競合が残る (= N1 からの既存バグだが focus select でより到達しやすい)。対策として、**reset が実際にクリアする経路でのみ `selectSeqRef.current++`** して in-flight select を失効させる:
+- 検索語 reset: **skip 経路 (`debouncedQ === skip`) では bump しない** (= 保持したい focus select を捨てない)。クリアする経路でのみ bump。
+- source reset: 常に bump してからクリア。
+
+これで「filter 変更時は一覧に無いノートを出し続けない」reset の意図が、遅延 fetch の resolve でも崩れない。
+
+### 6.4 やらないこと (= 明示)
+
+- **`notes` への追加 insert はしない** (= ノートは save_note で保存済み)。ReportPanel 表示は in-memory 速報のまま、リロードで消えてよい。
+- **`emitReportUpdate` 等の persist ヘルパは作らない**。
+- **`morning_brief` / `dispatcher` / `list_todos` 等の既存 `report_update` は一切変更しない** (= 従来どおり live のみ、`noteId` 無し)。
+- ReportPanel の履歴ナビ (←/→) の取得元変更もしない (= in-memory 10 件のまま)。
 
 ---
 
@@ -325,7 +413,7 @@ VRM は `.vrm`(glTF) と PNG のみで magic byte が成立するが、ノート
 | Phase | 内容 |
 |---|---|
 | **N1** | `notes` + `note_chunks` テーブル (migration 0068) + 本文の chunk 分割 embed + `src/lib/notes.ts` (CRUD + browse/search 検索 §4) + `/api/notes` (一覧/検索/CRUD) + Notes Modal (検索+無限スクロール+react-markdown 描画(raw HTML 無効)+インライン編集) + IconBar 追加 + `save_note`/`search_notes` tool |
-| **N2** | ReportPanel 永続化移行 (= `report_update` に persist フラグ + notes insert、履歴を notes から取得) |
+| **N2** | `save_note` 実行時に保存済みノートを ReportPanel へ live 表示 (title+body)。`ReportUpdateEvent.noteId` を SSE→ChatPanel→page→ReportPanel まで通し、エントリクリックで NotesModal を該当ノートで開く。**永続化なし** (= ノートは save_note で保存済み。persist ヘルパや既存 producer の変更はしない)。詳細 §6 |
 | **N3** | エージェント/MCP writer 統合 (= Doc Agent / Deep Research の出力を notes へ) + 通知連携 (refTable='notes') |
 | **N4a** | 添付の土台 (`note_files` + `note-storage.ts` + upload/serve API + kind 別検証 §10.1)。ClamAV 未稼働なので `scan_status='skipped'` で保存。**file-security に依存せず先行可** |
 | **N4b** | file-security Phase S1 完了後、ClamAV scan を有効化 (= upload 時 scan → clean/infected、infected は拒否)。env で「scan 必須時は未稼働ならアップロード拒否」を選択可 (§10.2) |

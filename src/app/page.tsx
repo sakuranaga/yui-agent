@@ -152,6 +152,8 @@ export default function Home() {
   const [remindersOpen, setRemindersOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  // ReportPanel のノートタイトルタブクリックで開く対象ノート。NotesModal が消費したら null に戻す。
+  const [focusNoteId, setFocusNoteId] = useState<number | null>(null);
   // Hub からのジャンプ要求: 該当 modal を開く + project filter を pre-set。
   // 受信した event.detail.projectName を該当 modal に prop で流す。
   const [todoPresetProject, setTodoPresetProject] = useState<string | null>(null);
@@ -384,13 +386,19 @@ export default function Home() {
   );
 
   const handleReportUpdate = useCallback(
-    (title: string, markdown: string) => {
-      const fresh: Report = { title, markdown, receivedAt: Date.now() };
+    (title: string, markdown: string, noteId?: number) => {
+      const fresh: Report = { title, markdown, receivedAt: Date.now(), noteId };
       // 新着を先頭に追加し、最新 10 件のみ保持。
       setReports((prev) => [fresh, ...prev].slice(0, 10));
     },
     []
   );
+
+  // ReportPanel のノートタイトルタブをクリック → その note を NotesModal で開く。
+  const handleOpenNoteFromReport = useCallback((noteId: number) => {
+    setFocusNoteId(noteId);
+    setNotesOpen(true);
+  }, []);
 
   // ハート burst の管理 (VRM 上のダブルクリック対応)
   const [heartBursts, setHeartBursts] = useState<HeartBurstType[]>([]);
@@ -539,7 +547,7 @@ export default function Home() {
           onOpenProjects={() => setProjectsOpen(true)}
           onOpenNotes={() => setNotesOpen(true)}
         />
-        <ReportPanel reports={reports} />
+        <ReportPanel reports={reports} onOpenNote={handleOpenNoteFromReport} />
         {sessionId && (
           <div className="left-toast-column">
             <NotificationToast sessionId={sessionId} />
@@ -610,7 +618,12 @@ export default function Home() {
       )}
       <SleepOverlay />
       <ProjectHubModal open={projectsOpen} onClose={() => setProjectsOpen(false)} />
-      <NotesModal open={notesOpen} onClose={() => setNotesOpen(false)} />
+      <NotesModal
+        open={notesOpen}
+        onClose={() => setNotesOpen(false)}
+        focusNoteId={focusNoteId}
+        onFocusConsumed={() => setFocusNoteId(null)}
+      />
       <MailComposeModal
         open={externalCompose !== null}
         mode={externalCompose}

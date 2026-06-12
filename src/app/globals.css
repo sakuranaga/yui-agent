@@ -644,6 +644,32 @@ body > div {
   text-overflow: ellipsis;
 }
 
+/* タイトルタブがノートリンクの時 (= save_note 由来)。button 既定スタイルを打ち消し、クリック可能に見せる。 */
+.report-panel-titletab-link {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: box-shadow 0.15s, transform 0.15s, filter 0.15s;
+}
+
+.report-panel-titletab-link:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 6px 16px rgba(var(--accent-2-rgb), 0.5);
+  transform: translateY(-1px);
+}
+
+.report-panel-titletab-link:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.report-panel-titletab-link > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 .report-panel-close {
   position: absolute;
   top: 10px;

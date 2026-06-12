@@ -65,7 +65,7 @@ export type AudioBridge = {
 type Props = {
   onBotResponse: (text: string, emotion: VRMExpression) => void;
   /** Specialist 完了時に report agent が生成した note を親に流す */
-  onReportUpdate?: (title: string, markdown: string) => void;
+  onReportUpdate?: (title: string, markdown: string, noteId?: number) => void;
   /** Mutable bridge so VRMViewer can read live audio amplitude in its frame loop. */
   audioBridge: { current: AudioBridge };
 };
@@ -501,8 +501,9 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
           title: string;
           markdown: string;
           specialistId?: string;
+          noteId?: number;
         };
-        onReportUpdateRef.current?.(data.title, data.markdown);
+        onReportUpdateRef.current?.(data.title, data.markdown, data.noteId);
       } catch (err) {
         console.warn("malformed report_update:", err);
       }

@@ -13,7 +13,14 @@ import remarkGfm from "remark-gfm";
 import { useModalTransition } from "@/lib/useModalTransition";
 import ProjectChipsEditor from "./ProjectChipsEditor";
 
-type Props = { open: boolean; onClose: () => void };
+type Props = {
+  open: boolean;
+  onClose: () => void;
+  /** ReportPanel クリックで開いた時に右ペインへ表示するノート id。null なら通常オープン。 */
+  focusNoteId?: number | null;
+  /** focusNoteId を消費した (= select を発火した) ことを親に通知し、null に戻させる。 */
+  onFocusConsumed?: () => void;
+};
 
 type NoteItem = {
   id: number;
@@ -55,7 +62,7 @@ function fmtDate(s: string): string {
   }).format(d);
 }
 
-export default function NotesModal({ open, onClose }: Props) {
+export default function NotesModal({ open, onClose, focusNoteId, onFocusConsumed }: Props) {
   const { mounted, closing } = useModalTransition(open);
 
   const [q, setQ] = useState("");
@@ -84,6 +91,9 @@ export default function NotesModal({ open, onClose }: Props) {
   const fetchSeqRef = useRef(0); // fetchFirst の競合ガード (= 古い結果で上書きしない)
   const selectSeqRef = useRef(0); // select の競合ガード
   const loadingMoreRef = useRef(false); // loadMore の同期二重発火ガード
+  // フォーカス select 時、遅延 debounce が「着地予定値」で reset を撃つのを 1 回だけ無効化する token。
+  // 値特定 (debouncedQ === token) で skip するので、source 変更や追加入力の正当な reset は飲み込まない。
+  const focusSkipTokenRef = useRef<string | null>(null);
 
   // 検索 debounce
   useEffect(() => {
@@ -139,14 +149,33 @@ export default function NotesModal({ open, onClose }: Props) {
     void fetchFirst();
   }, [fetchFirst]);
 
-  // 検索語 / source フィルタが変わったら右ペインの選択を解除 (= 一覧に無いノートを出し続けない)
+  // 検索語 / source フィルタが変わったら右ペインの選択を解除 (= 一覧に無いノートを出し続けない)。
+  // reset を debouncedQ 用 / source 用に分離し、フォーカス token skip は debouncedQ 側だけに適用する
+  // (= source 変更を誤って飲み込まない。設計 docs/yui-notes.md §6.3.1)。
   /* eslint-disable react-hooks/set-state-in-effect -- フィルタ変更時の意図的なリセット */
   useEffect(() => {
+    // 検索語 reset。フォーカス時に立てた「遅延 debounce 着地予定値」と一致した 1 回だけ skip する。
+    const skip = focusSkipTokenRef.current;
+    focusSkipTokenRef.current = null; // token は次の 1 回で使い切る
+    if (skip !== null && debouncedQ === skip) return; // 遅延 debounce 着地による spurious reset のみ skip
+    // 実際にクリアする時は in-flight の select() も失効させる (= 後から resolve して右ペインを
+    // 復活させる競合を防ぐ)。skip 経路では bump しない (= 保持したい focus select を捨てないため)。
+    selectSeqRef.current++;
     setSelectedId(null);
     setDetail(null);
     setEditing(false);
     setCreating(false);
-  }, [debouncedQ, source]);
+  }, [debouncedQ]);
+
+  useEffect(() => {
+    // source reset。常にクリア (= ユーザー起因のフィルタ変更なので skip しない)。古い token は捨てる。
+    focusSkipTokenRef.current = null;
+    selectSeqRef.current++; // in-flight の select() を失効
+    setSelectedId(null);
+    setDetail(null);
+    setEditing(false);
+    setCreating(false);
+  }, [source]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const loadMore = useCallback(async () => {
@@ -205,6 +234,19 @@ export default function NotesModal({ open, onClose }: Props) {
       console.warn("[notes] detail failed:", e);
     }
   }, []);
+
+  // ReportPanel のタイトルタブから開かれた時 (focusNoteId 指定)、該当ノートを右ペインに表示する。
+  // select は /api/notes/{id} を直接引くので一覧 load 状態に依存しない。消費後は親に通知して null へ戻す。
+  /* eslint-disable react-hooks/set-state-in-effect -- prop (focusNoteId) 起因の意図的な select 同期 */
+  useEffect(() => {
+    if (!open || focusNoteId == null) return;
+    // pending debounce がある時だけ「着地予定値」を token に記録 (= 遅延 debounce の spurious reset を 1 回無効化)。
+    const trimmed = q.trim();
+    if (trimmed !== debouncedQ) focusSkipTokenRef.current = trimmed;
+    void select(focusNoteId);
+    onFocusConsumed?.();
+  }, [open, focusNoteId, q, debouncedQ, select, onFocusConsumed]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const startCreate = () => {
     setCreating(true);

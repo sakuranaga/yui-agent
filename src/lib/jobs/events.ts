@@ -37,6 +37,12 @@ export type ReportUpdateEvent = {
   /** 本文 markdown */
   markdown: string;
   specialistId?: string;
+  /**
+   * 紐づくノート id (= save_note で保存したノート)。
+   * 付いている時だけ ReportPanel のタイトルタブをクリック可能にし、NotesModal を該当ノートで開く。
+   * 既存 producer (morning brief / list_todos 等) は付けない (= optional)。
+   */
+  noteId?: number;
 };
 
 /** Timer/Alarm lifecycle イベント */

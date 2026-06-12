@@ -21,14 +21,18 @@ export type Report = {
   markdown: string;
   /** 受信タイムスタンプ (ms)。新着判定用 */
   receivedAt: number;
+  /** 紐づくノート id (= save_note 由来)。ある時だけタイトルタブをクリック可にする。 */
+  noteId?: number;
 };
 
 type Props = {
   /** 新しい順 (newest first) の配列。空配列なら未生成扱い。 */
   reports: Report[];
+  /** タイトルタブクリックで該当ノートを NotesModal で開く (= noteId を持つ report のみ)。 */
+  onOpenNote?: (noteId: number) => void;
 };
 
-export default function ReportPanel({ reports }: Props) {
+export default function ReportPanel({ reports, onOpenNote }: Props) {
   const [open, setOpen] = useState(false);
   // 表示中の index (0 = 最新)。新着で 0 にリセット。
   const [viewIndex, setViewIndex] = useState(0);
@@ -74,10 +78,24 @@ export default function ReportPanel({ reports }: Props) {
 
   return (
     <div className={`report-panel ${closing ? "report-panel-closing" : ""}`} role="dialog" aria-label="結衣のメモ">
-      <div className="report-panel-titletab">
-        <NoteIcon size={14} />
-        <span>{current?.title ?? "メモ"}</span>
-      </div>
+      {current?.noteId != null && onOpenNote ? (
+        <button
+          type="button"
+          className="report-panel-titletab report-panel-titletab-link"
+          onClick={() => onOpenNote(current.noteId!)}
+          title="ノートを開く"
+          aria-label={`ノートを開く: ${current.title}`}
+        >
+          <NoteIcon size={14} />
+          <span>{current.title}</span>
+          <OpenIcon />
+        </button>
+      ) : (
+        <div className="report-panel-titletab">
+          <NoteIcon size={14} />
+          <span>{current?.title ?? "メモ"}</span>
+        </div>
+      )}
       <button
         type="button"
         className="report-panel-close"
@@ -159,6 +177,27 @@ export default function ReportPanel({ reports }: Props) {
         </div>
       )}
     </div>
+  );
+}
+
+/** lucide 風「開く」アイコン (square-arrow-out-up-right)。タイトルタブがノートリンクの時に付ける。 */
+function OpenIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6" />
+      <path d="m21 3-9 9" />
+      <path d="M15 3h6v6" />
+    </svg>
   );
 }
 
