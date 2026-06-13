@@ -25,7 +25,11 @@ const mcpHandler = createMcpHandler(
   },
   {},
   {
-    basePath: "/api/mcp",
+    // mcp-handler は streamableHttpEndpoint = `${basePath}/mcp` を pathname 完全一致で
+    // ルーティングする (dist deriveEndpointsFromBasePath)。この route は /api/mcp を
+    // serve するので basePath は "/api" にして endpoint を /api/mcp に一致させる
+    // (basePath "/api/mcp" だと /api/mcp/mcp を期待され Not found になる)。
+    basePath: "/api",
     // SSE 再開用 redis (任意)。未設定なら非再開モードで動く。
     redisUrl: process.env.VALKEY_URL ?? process.env.REDIS_URL,
   }

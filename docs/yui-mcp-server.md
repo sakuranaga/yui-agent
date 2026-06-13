@@ -60,6 +60,7 @@ CLAUDE.md の依存ルールに従い、追加理由を明記して承認をい�
 - **`POST /api/mcp`** (+ MCP 仕様上必要なら `GET`/`DELETE`): Streamable HTTP。
 - **stateless** 運用 (リクエストごとに transport/server を生成)。理由: tool は短命な CRUD/notify で、セッション状態を持つ必要がない。スケール時も Valkey 無しで動く。SSE 常時接続が要る将来要件 (進捗ストリーム) が出たら stateful + Valkey に拡張。
 - `mcp-handler` の `createMcpHandler(server => { server.registerTool(...) })` パターンで route を構成。
+- **basePath の罠 (実機テストで判明)**: mcp-handler は `streamableHttpEndpoint = ${basePath}/mcp` を **pathname 完全一致**でルーティングする (`deriveEndpointsFromBasePath`)。この route は `/api/mcp` を serve するので **`basePath: "/api"`** にして endpoint を `/api/mcp` に一致させる。`basePath: "/api/mcp"` にすると `/api/mcp/mcp` を期待され、`/api/mcp` への POST は **"Not found"** になる (InMemory transport では再現せず、実 HTTP でのみ顕在化)。`scripts/test-mcp-http.ts` が実トランスポートで回帰検証する。
 
 ---
 
