@@ -9,8 +9,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerNoteTools } from "@/lib/mcp/tools-note";
+import { registerTodoTools } from "@/lib/mcp/tools-todo";
+import { registerReminderTools } from "@/lib/mcp/tools-reminder";
 import { getMcpToken, rotateMcpToken, verifyMcpToken } from "@/lib/mcp-token";
 import { deleteNote } from "@/lib/notes";
+import { deleteTodo } from "@/lib/todos";
+import { deleteReminder } from "@/lib/reminders";
 
 let passed = 0;
 const failures: string[] = [];
@@ -28,6 +32,9 @@ type CallResult = { structuredContent?: Record<string, unknown>; isError?: boole
 
 async function main() {
   const created: number[] = [];
+  const createdTodos: string[] = [];
+  const createdReminders: number[] = [];
+  let call: (name: string, args: Record<string, unknown>) => Promise<CallResult> = async () => ({});
   try {
     // --- 1. mcp-token ---
     console.log("[1] mcp-token");
@@ -47,10 +54,14 @@ async function main() {
     console.log("[2] MCP note tools (InMemory E2E)");
     const server = new McpServer({ name: "yui-test", version: "0.0.0" });
     registerNoteTools(server);
+    registerTodoTools(server);
+    registerReminderTools(server);
     const client = new Client({ name: "test-client", version: "0.0.0" });
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
     await server.connect(serverT);
     await client.connect(clientT);
+    call = (name, args) =>
+      client.callTool({ name, arguments: args }) as Promise<CallResult>;
 
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
@@ -58,7 +69,19 @@ async function main() {
       ["note_archive", "note_create", "note_get", "note_search", "note_update"].every((n) =>
         names.includes(n)
       ),
-      `note tool 5 種が list される (${names.join(",")})`
+      `note tool 5 種が list される`
+    );
+    check(
+      ["todo_add", "todo_list", "todo_search", "todo_update", "todo_complete"].every((n) =>
+        names.includes(n)
+      ),
+      `todo tool 5 種が list される`
+    );
+    check(
+      ["reminder_add", "reminder_list", "reminder_update", "reminder_disable"].every((n) =>
+        names.includes(n)
+      ),
+      `reminder tool 4 種が list される`
     );
 
     // create
@@ -120,12 +143,60 @@ async function main() {
     })) as CallResult;
     check(badRes.isError === true, "空 body_md は zod で弾かれ isError");
 
+    // --- 3. todo tools ---
+    console.log("[3] MCP todo tools");
+    const todoTitle = `MCP TODO ${Date.now()}`;
+    const tAdd = await call("todo_add", { title: todoTitle, priority: 2 });
+    const todoIdent = String(tAdd.structuredContent?.identifier ?? "");
+    check(Number(tAdd.structuredContent?.id) > 0 && todoIdent !== "", "todo_add で id/identifier");
+    if (todoIdent) createdTodos.push(todoIdent);
+    const tSearch = await call("todo_search", { query: todoTitle });
+    const tHits = (tSearch.structuredContent?.todos ?? []) as Array<{ identifier: string }>;
+    check(tHits.some((t) => t.identifier === todoIdent), "todo_search でヒット");
+    const tUpd = await call("todo_update", { identifier: todoIdent, priority: 1 });
+    check(tUpd.structuredContent?.updated === true, "todo_update updated");
+    const tDone = await call("todo_complete", { identifier: todoIdent });
+    check(tDone.structuredContent?.completed === true, "todo_complete (= ソフト削除)");
+    const tBad = await call("todo_add", { title: "" });
+    check(tBad.isError === true, "空 title は zod で弾かれ isError");
+
+    // --- 4. reminder tools ---
+    console.log("[4] MCP reminder tools");
+    const rAdd = await call("reminder_add", {
+      title: `MCP リマインダー ${Date.now()}`,
+      schedule_kind: "weekly",
+      base_time: "08:00",
+      weekdays: [1, 3, 5],
+      lead_minutes: 0,
+    });
+    const remId = Number(rAdd.structuredContent?.id);
+    check(remId > 0, `reminder_add で id (${remId})`);
+    if (remId > 0) createdReminders.push(remId);
+    const rList = await call("reminder_list", {});
+    const rHits = (rList.structuredContent?.reminders ?? []) as Array<{ id: number; enabled: boolean }>;
+    check(rHits.some((r) => r.id === remId), "reminder_list に出る (有効)");
+    const rUpd = await call("reminder_update", { id: remId, title: "改名" });
+    check(rUpd.structuredContent?.updated === true, "reminder_update updated");
+    const rDis = await call("reminder_disable", { id: remId });
+    check(rDis.structuredContent?.disabled === true, "reminder_disable (= ソフト削除)");
+    const rList2 = await call("reminder_list", {});
+    const rHits2 = (rList2.structuredContent?.reminders ?? []) as Array<{ id: number }>;
+    check(!rHits2.some((r) => r.id === remId), "disable 後は既定一覧に出ない");
+    const rBad = await call("reminder_add", { title: "x", schedule_kind: "once" });
+    check(rBad.isError === true, "once で base_at 無しは error");
+    const rBadTime = await call("reminder_add", {
+      title: "x",
+      schedule_kind: "weekly",
+      base_time: "24:99",
+    });
+    check(rBadTime.isError === true, "範囲外 base_time (24:99) は error");
+
     await client.close();
     await server.close();
   } finally {
-    for (const id of created) {
-      await deleteNote(id).catch(() => {});
-    }
+    for (const id of created) await deleteNote(id).catch(() => {});
+    for (const ident of createdTodos) await deleteTodo(ident).catch(() => {});
+    for (const id of createdReminders) await deleteReminder(id).catch(() => {});
   }
 
   console.log(`\n=== ${passed} passed, ${failures.length} failed ===`);

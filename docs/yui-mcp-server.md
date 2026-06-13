@@ -104,7 +104,9 @@ tool 名は `<domain>_<action>` で MCP クライアントから読みやすく�
 > - `addTodo` は `{ sessionId, title, projectName?, dueAt?, startAt?, ... }` (todos.ts:138)。`updateTodo`/`completeTodo` は **`identifier` 必須** (id ではない、todos.ts:254)。
 > - `createReminder` は `{ sessionId, kind, title, schedule: ReminderSchedule }` で、`schedule_kind`/`base_at`/`weekdays`/`lead_minutes` から **`ReminderSchedule` を組み立てて**渡す (reminders.ts:24)。既存 `add_reminder` tool (`src/lib/tools/reminder/add_reminder.ts`) の組み立てロジックを流用する。
 >
-> **session-scoped 書き込みの sessionId (Codex 指摘)**: notes は sessionId 不要 (グローバル) だが、**todos/reminders は sessionId 必須**。MCP は web セッションを持たないので、**正規 owner session 定数 (例 `"primary"`)** を MCP 由来の session-scoped 書き込みの **attribution** に使う。
+> **session-scoped 書き込みの sessionId (Codex 指摘)**: notes は sessionId 不要 (グローバル) だが、**todos/reminders は sessionId 必須**。MCP は web セッションを持たないので、**正規 owner session 定数 (例 `"primary"`)** を MCP 由来の session-scoped **作成**の **attribution** に使う。
+> - **所有権境界ではない (Codex M2 指摘)**: MCP の list/update/complete/disable は id/identifier 指定で **全 todo/reminder を対象に操作できる** (= ゆい/UI で作った分も含む)。これは**意図的** — ご主人様自身のエージェントが自分の全データを管理できる設計。tool description にもその旨を記す。
+> - **weekly base_time の検証**: `HH:MM` 形を正規表現で見るだけでなく `0<=h<=23 / 0<=m<=59` を range check する (= `24:99` 等で nextDueAt が壊れるのを防ぐ。Codex M2 指摘)。
 > - **リマインダー発火は既存の発火経路をそのまま使う** (Codex 指摘 #2)。現 scheduler (`reminder-dispatch`) は due reminder を `findActiveSessionId()` (最新 Web session) に通知し、`reminders.sessionId` は発火先に使っていない。**MCP はリマインダー行を作るだけで、発火ルーティングは変更しない** → MCP 作成リマインダーも**通常リマインダーと同じ挙動** (在席時に発火通知が届く)。「active session が無くても届く」とは主張しない (= 通常リマインダーと同じ制約)。発火ルーティング自体の改善は本設計のスコープ外。
 
 ### 5.1 ノート (`src/lib/notes.ts` 再利用)

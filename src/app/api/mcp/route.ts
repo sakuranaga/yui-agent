@@ -10,13 +10,17 @@
 import { createMcpHandler } from "mcp-handler";
 import { verifyMcpToken } from "@/lib/mcp-token";
 import { registerNoteTools } from "@/lib/mcp/tools-note";
+import { registerTodoTools } from "@/lib/mcp/tools-todo";
+import { registerReminderTools } from "@/lib/mcp/tools-reminder";
 
 export const runtime = "nodejs";
 
 const mcpHandler = createMcpHandler(
   (server) => {
     registerNoteTools(server);
-    // M2: todo/reminder, M3: notify を順次追加
+    registerTodoTools(server);
+    registerReminderTools(server);
+    // M3: notify を追加予定
   },
   {},
   {
