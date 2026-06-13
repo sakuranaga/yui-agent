@@ -17,6 +17,7 @@ import ThemeSection from "./ThemeSection";
 import ProjectsSection from "./ProjectsSection";
 import GoogleIntegrationSection from "./GoogleIntegrationSection";
 import SpotifyIntegrationSection from "./SpotifyIntegrationSection";
+import McpIntegrationSection from "./McpIntegrationSection";
 import DictionarySection from "./DictionarySection";
 import NotificationsSection from "./NotificationsSection";
 import NewsSourcesSection from "./NewsSourcesSection";
@@ -252,6 +253,7 @@ export default function SettingsModal({ open, onClose }: Props) {
               <>
                 <GoogleIntegrationSection />
                 <SpotifyIntegrationSection />
+                <McpIntegrationSection />
               </>
             )}
             {active === "notifications" && <NotificationsSection />}
