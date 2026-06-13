@@ -9,6 +9,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Specialist } from "./types";
 import { buildTimeContextBlock } from "@/lib/time";
+import { wrapDirective, buildInternalDirectiveGuard } from "@/lib/internal-directive";
 
 import { callLlm } from "@/lib/llm";
 
@@ -97,6 +98,8 @@ export async function runSpecialist(
         { type: "text", text: buildTimeContextBlock() },
         // metadata 駆動 guard (= untrustedOutput / confirmationPolicy ある時のみ inject)
         ...metadataDrivenGuards,
+        // <yui_directive> (= 予算切れ時の最終 summary 指示等、サーバ注入の内部ディレクティブ) の扱い
+        { type: "text", text: buildInternalDirectiveGuard() },
       ],
       tools,
       messages,
@@ -185,8 +188,9 @@ export async function runSpecialist(
     }
     messages.push({
       role: "user",
-      content:
-        "ツール呼び出しの予算を使い切りました。これ以上ツールは呼べません。これまでの tool_result から得られたファクトだけを使って、ユーザーの依頼に対する最終回答を簡潔にまとめてください (新しい情報の創作・推測は禁止)。",
+      content: wrapDirective(
+        "ツール呼び出しの予算を使い切りました。これ以上ツールは呼べません。これまでの tool_result から得られたファクトだけを使って、ユーザーの依頼に対する最終回答を簡潔にまとめてください (新しい情報の創作・推測は禁止)。"
+      ),
     });
     try {
       const finalResp = await callLlm("specialist", {
@@ -198,6 +202,8 @@ export async function runSpecialist(
             text: spec.systemPrompt,
             cache_control: { type: "ephemeral" },
           },
+          // 直前に push した <yui_directive> (予算切れ→最終 summary 指示) を正しく解釈させる
+          { type: "text", text: buildInternalDirectiveGuard() },
         ],
         messages,
       });
