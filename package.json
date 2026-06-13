@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.40.1",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "@monyone/aho-corasick": "1.1.11",
     "@pixiv/three-vrm": "3.5.3",
     "@pixiv/three-vrm-animation": "3.5.3",
@@ -33,6 +34,7 @@
     "ioredis": "5.11.0",
     "isomorphic-dompurify": "3.16.0",
     "jose": "6.2.3",
+    "mcp-handler": "1.1.0",
     "next": "16.2.7",
     "pg": "8.21.0",
     "postgres": "3.4.9",
@@ -41,7 +43,8 @@
     "react-markdown": "9.1.0",
     "remark-gfm": "4.0.1",
     "rss-parser": "3.13.0",
-    "three": "0.171.0"
+    "three": "0.171.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@eslint/eslintrc": "3.3.5",

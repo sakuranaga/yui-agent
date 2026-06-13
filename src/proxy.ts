@@ -30,6 +30,10 @@ const PUBLIC_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/health/import", // iOS Shortcut 用、独自 X-Internal-Auth ヘッダで認証
+  // MCP サーバ。cookie 非対応の CLI が叩くので cookie ゲートを迂回し、route 内で Bearer 検証。
+  // 注意: prefix match なので /api/mcp/* も public になる。**cookie 認証が要る管理 API
+  // (トークン表示/ローテート) は /api/mcp 配下に置かない** (= /api/settings/mcp-token に置く)。
+  "/api/mcp",
   // OAuth 外部 IdP からの戻り (= cross-site redirect で SameSite=Strict cookie が落ちる)。
   // CSRF は callback 側の state cookie 一致で防いでいる。
   "/api/auth/google/callback",
