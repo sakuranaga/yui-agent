@@ -30,7 +30,11 @@ export function wrapUntrusted(
 
   const escaped = json
     .replace(/<\/untrusted_[a-z_]+_[0-9a-f]{16}>/g, PLACEHOLDER)
-    .replace(new RegExp(closeTag.replace(/\//g, "\\/"), "g"), PLACEHOLDER);
+    .replace(new RegExp(closeTag.replace(/\//g, "\\/"), "g"), PLACEHOLDER)
+    // 多層防御: 第三者本文に内部ディレクティブタグ文字列を書かれても無効化する
+    // (= タグ文字列だけを信頼根拠にしない。docs/internal-directive-unification.md §3.2.1)。
+    .split("<yui_directive>").join(PLACEHOLDER)
+    .split("</yui_directive>").join(PLACEHOLDER);
 
   return `${openTag}\n${escaped}\n${closeTag}`;
 }
