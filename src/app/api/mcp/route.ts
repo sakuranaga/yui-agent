@@ -12,6 +12,7 @@ import { verifyMcpToken } from "@/lib/mcp-token";
 import { registerNoteTools } from "@/lib/mcp/tools-note";
 import { registerTodoTools } from "@/lib/mcp/tools-todo";
 import { registerReminderTools } from "@/lib/mcp/tools-reminder";
+import { registerNotifyTools } from "@/lib/mcp/tools-notify";
 
 export const runtime = "nodejs";
 
@@ -20,7 +21,7 @@ const mcpHandler = createMcpHandler(
     registerNoteTools(server);
     registerTodoTools(server);
     registerReminderTools(server);
-    // M3: notify を追加予定
+    registerNotifyTools(server);
   },
   {},
   {

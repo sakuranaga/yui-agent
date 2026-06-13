@@ -57,6 +57,7 @@ export type LlmRole =
   | "tts_normalize" // TTS 前処理 (記号 / 英語 / 漢字読み正規化、Haiku)
   | "mail_curate"   // メール仕分け (本文込み bucket + score、Haiku でも十分)
   | "food_extract"  // 会話から食事ログ抽出 (eaten_at 推定込み)、栄養 lookup の引き当ても兼ねる
+  | "notify"        // MCP notify: 開発エージェントの進捗連絡 → 結衣口調に整形 (ローカル優先 + Haiku fallback)
   | "specialist";  // specialist 個別呼び出し (model は spec.model で上書き)
 
 /** role 全部を main / haiku の 2 モデルにマップする。AI 設定 UI で 2 つだけ

@@ -28,7 +28,8 @@ export type EventKind =
   | "music"
   | "schedule"
   | "health"
-  | "reminder";
+  | "reminder"
+  | "mcp_notify";
 
 /** Discord 転送ポリシー */
 export type DiscordPolicy = "always" | "away_only" | "never";
@@ -147,6 +148,15 @@ export const DEFAULT_RULES: Rule[] = [
     toastOnline: true,  speakOnline: false,
     toastAway:   true,  speakAway:   false,
     toastFocus:  true,  speakFocus:  true,
+    discordPolicy: "away_only",
+    importance: "normal",
+  },
+  // MCP 作業連絡 (Claude Code 等 → ゆいが報告): online で発話 + toast、away は toast のみ、focus は抑制
+  {
+    eventKind: "mcp_notify",
+    toastOnline: true,  speakOnline: true,
+    toastAway:   true,  speakAway:   false,
+    toastFocus:  false, speakFocus:  false,
     discordPolicy: "away_only",
     importance: "normal",
   },

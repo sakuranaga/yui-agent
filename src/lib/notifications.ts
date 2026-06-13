@@ -55,6 +55,16 @@ export type DispatchInput = {
    * toast / 履歴 / Discord 転送には影響しない。
    */
   skipAutoSpeak?: boolean;
+  /**
+   * Discord 転送を抑止する。複数 active session へ broadcast する時、各 session 呼び出しで
+   * 多重転送しないよう true にし、代表 1 回だけ別途転送する (= dispatchNotificationToActiveSessions)。
+   */
+  skipDiscordForward?: boolean;
+  /**
+   * state/policy に関わらず Discord 転送を強制する。離席 (active session ゼロ) 時に
+   * MCP notify を確実に Discord で届けるために使う。suppressed 時は対象外。
+   */
+  forceDiscord?: boolean;
 };
 
 export type DispatchResult = {
@@ -134,7 +144,11 @@ export async function dispatchNotification(
     // suppressed=true (= sleep / throttle 等で意図的に抑制) のときは Discord にも
     // 漏らさない。toast / speak を出さない決定と Discord 配信は同じ意図 (= 静かに) と扱う。
     let forwardToDiscord = false;
-    if (!input.suppressed && rawState !== "focus" && rawState !== "private") {
+    if (input.suppressed || input.skipDiscordForward) {
+      forwardToDiscord = false;
+    } else if (input.forceDiscord) {
+      forwardToDiscord = true; // 離席時の MCP notify 等、state/policy を無視して確実に届ける
+    } else if (rawState !== "focus" && rawState !== "private") {
       if (rule.discordPolicy === "always") forwardToDiscord = true;
       else if (rule.discordPolicy === "away_only" && rawState === "away") forwardToDiscord = true;
     }
@@ -200,6 +214,52 @@ export async function dispatchNotification(
     console.warn("[notifications] dispatch failed:", e);
   }
   return result;
+}
+
+/**
+ * 特定 session に紐づかない通知 (= MCP notify 等) を active な **Web** session に配信する。
+ *
+ * - active Web session あり: 各 session に dispatchNotification (toast/speak/履歴を各画面に)。
+ *   Discord 多重転送を防ぐため、**先頭 1 件だけ** Discord 判定を有効にし (= rule + その session の
+ *   state で away_only/always を 1 回評価)、残りは skipDiscordForward:true。
+ * - active Web session ゼロ (= 離席): in-app は出せない (UI は current session しか読まない) ので、
+ *   owner session に forceDiscord + skipAutoSpeak で 1 件 dispatch → Discord 転送 + 履歴 row (= log)
+ *   のみ (toast push は購読者ゼロで no-op、speak/overlay は skipAutoSpeak で抑止)。
+ *
+ * 注: Discord bot 自身の SSE 購読 session (DISCORD_SESSION_ID) は Web session に数えない
+ * (= これを含めると「離席」判定が常に潰れる)。
+ *
+ * 設計: docs/yui-mcp-server.md §6.3
+ */
+export async function dispatchNotificationToActiveSessions(
+  input: Omit<DispatchInput, "sessionId">
+): Promise<{ delivered: number; discordForwarded: boolean }> {
+  const { activeSessionIds } = await import("@/lib/jobs/events");
+  const botSid = process.env.DISCORD_SESSION_ID;
+  const webSessions = activeSessionIds().filter((sid) => sid !== botSid);
+
+  if (webSessions.length > 0) {
+    let discordForwarded = false;
+    for (let i = 0; i < webSessions.length; i++) {
+      const r = await dispatchNotification({
+        ...input,
+        sessionId: webSessions[i],
+        skipDiscordForward: i !== 0, // 先頭だけ Discord 判定を許可 (= rule を 1 回尊重)
+      });
+      if (r.discordForwarded) discordForwarded = true;
+    }
+    return { delivered: webSessions.length, discordForwarded };
+  }
+
+  // 離席: Discord + log のみ
+  const { MCP_OWNER_SESSION_ID } = await import("@/lib/mcp/const");
+  const r = await dispatchNotification({
+    ...input,
+    sessionId: MCP_OWNER_SESSION_ID,
+    forceDiscord: true,
+    skipAutoSpeak: true,
+  });
+  return { delivered: 0, discordForwarded: r.discordForwarded };
 }
 
 /**

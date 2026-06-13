@@ -37,6 +37,7 @@ const VALID_KIND = new Set<EventKind>([
   "schedule",
   "health",
   "reminder",
+  "mcp_notify",
 ]);
 
 type LegacyPatchBody = {

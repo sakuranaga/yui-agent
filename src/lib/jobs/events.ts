@@ -201,6 +201,11 @@ export function sessionSubscriberCount(sessionId: string): number {
   return subs.get(sessionId)?.size ?? 0;
 }
 
+/** 現在 SSE 購読中の (= active) session id 一覧。MCP notify の broadcast 等で使う。 */
+export function activeSessionIds(): string[] {
+  return [...subs.keys()];
+}
+
 export function allSubscribersCount(): { sessions: number; total: number } {
   let total = 0;
   for (const s of subs.values()) total += s.size;

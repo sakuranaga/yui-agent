@@ -44,6 +44,7 @@ const KIND_LABEL: Record<string, string> = {
   schedule: "予定 (5 分前)",
   health: "体調 / 健康警告",
   reminder: "リマインダー",
+  mcp_notify: "作業連絡 (MCP)",
 };
 
 // timer は独自 UI / 設定 BYPASS なので表示対象外 (= 設計 §2.8)

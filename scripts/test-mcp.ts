@@ -11,10 +11,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerNoteTools } from "@/lib/mcp/tools-note";
 import { registerTodoTools } from "@/lib/mcp/tools-todo";
 import { registerReminderTools } from "@/lib/mcp/tools-reminder";
+import { registerNotifyTools } from "@/lib/mcp/tools-notify";
 import { getMcpToken, rotateMcpToken, verifyMcpToken } from "@/lib/mcp-token";
 import { deleteNote } from "@/lib/notes";
 import { deleteTodo } from "@/lib/todos";
 import { deleteReminder } from "@/lib/reminders";
+import { getRule } from "@/lib/notification-settings";
+import { dispatchNotificationToActiveSessions } from "@/lib/notifications";
+import { subscribeSession, type ServerEvent } from "@/lib/jobs/events";
 
 let passed = 0;
 const failures: string[] = [];
@@ -56,6 +60,7 @@ async function main() {
     registerNoteTools(server);
     registerTodoTools(server);
     registerReminderTools(server);
+    registerNotifyTools(server);
     const client = new Client({ name: "test-client", version: "0.0.0" });
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
     await server.connect(serverT);
@@ -83,6 +88,7 @@ async function main() {
       ),
       `reminder tool 4 種が list される`
     );
+    check(names.includes("notify_master"), "notify_master tool が list される");
 
     // create
     const uniq = `MCPテスト用語_${Date.now()}_qqzz`;
@@ -193,6 +199,60 @@ async function main() {
 
     await client.close();
     await server.close();
+
+    // --- 5. notify: EventKind 登録 + broadcast wrapper (LLM 非依存で配信ロジックを検証) ---
+    console.log("[5] notify (mcp_notify rule + broadcast)");
+    const rule = await getRule("mcp_notify");
+    check(rule.eventKind === "mcp_notify", "getRule('mcp_notify') が解決する (DEFAULT_RULES 登録)");
+    check(rule.toastOnline === true && rule.speakOnline === true, "既定 online = toast + speak");
+
+    const fakeSid = `test-notify-${Date.now()}`;
+    const events: ServerEvent[] = [];
+    const unsub = subscribeSession(fakeSid, (e) => events.push(e));
+    try {
+      const r = await dispatchNotificationToActiveSessions({
+        kind: "mcp_notify",
+        title: "テスト連絡",
+        preview: "ビルドが通りました",
+        speakText: "ご主人様、ビルドが通りましたよ。",
+      });
+      check(r.delivered >= 1, `active session に配信される (delivered=${r.delivered})`);
+      check(
+        events.some((e) => e.type === "notification"),
+        "notification(toast) event が届く"
+      );
+      check(
+        events.some((e) => e.type === "yui_message"),
+        "yui_message(speak) event が届く"
+      );
+    } finally {
+      unsub();
+    }
+
+    // bot session 除外: DISCORD_SESSION_ID に該当する購読は Web session に数えない
+    const prevBot = process.env.DISCORD_SESSION_ID;
+    const botSid = `test-bot-${Date.now()}`;
+    const webSid = `test-web-${Date.now()}`;
+    process.env.DISCORD_SESSION_ID = botSid;
+    const botEvents: ServerEvent[] = [];
+    const webEvents: ServerEvent[] = [];
+    const unsubBot = subscribeSession(botSid, (e) => botEvents.push(e));
+    const unsubWeb = subscribeSession(webSid, (e) => webEvents.push(e));
+    try {
+      await dispatchNotificationToActiveSessions({
+        kind: "mcp_notify",
+        title: "bot 除外テスト",
+        preview: "x",
+        speakText: "x",
+      });
+      check(webEvents.some((e) => e.type === "notification"), "Web session には届く");
+      check(botEvents.length === 0, "DISCORD_SESSION_ID の購読には配信しない (= Web に数えない)");
+    } finally {
+      unsubBot();
+      unsubWeb();
+      if (prevBot === undefined) delete process.env.DISCORD_SESSION_ID;
+      else process.env.DISCORD_SESSION_ID = prevBot;
+    }
   } finally {
     for (const id of created) await deleteNote(id).catch(() => {});
     for (const ident of createdTodos) await deleteTodo(ident).catch(() => {});

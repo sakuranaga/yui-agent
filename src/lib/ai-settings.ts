@@ -193,10 +193,12 @@ export async function getLocalLlmConfig(): Promise<LocalLlmConfig> {
   };
 }
 
-/** 指定 role でローカル LLM を使うべきか (enabled + roles 集合に含まれる) */
+/** 指定 role でローカル LLM を使うべきか (enabled + roles 集合に含まれる)。
+ * notify (MCP 進捗連絡の口調整形) は軽い整形なので、ローカル有効時は roles 設定に
+ * 関係なく既定でローカル優先にする (失敗時は callLlm が hosted Haiku に fallback)。 */
 export async function shouldUseLocalLlmFor(role: string): Promise<boolean> {
   const cfg = await getLocalLlmConfig();
-  return cfg.enabled && cfg.roles.has(role);
+  return cfg.enabled && (role === "notify" || cfg.roles.has(role));
 }
 
 /**
