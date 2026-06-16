@@ -38,10 +38,11 @@ export type OpenAICompatOpts = {
   toolChoice?: "auto" | { name: string };
   /** sampling temperature (未指定なら API 既定)。 */
   temperature?: number;
-  /** Gemma 3+/Qwen 3+ 等の thinking を抑制 (= ローカル self-host 用)。
-   *  true で body.chat_template_kwargs={enable_thinking:false} を送る。
-   *  OpenAI/Grok は未知フィールドで 400 になりうるので local_openai のみ true にすること。 */
-  disableThinking?: boolean;
+  /** ローカル thinking モデル (Gemma 3+/Qwen 3+ 等) の思考制御 (#206 §8.9)。
+   *  false → chat_template_kwargs:{enable_thinking:false} (抑制)、true → {enable_thinking:true} (強制 ON)、
+   *  undefined → 送らない (= サーバ既定)。OpenAI/Grok は未知フィールドで 400 になりうるので
+   *  local_openai 以外には渡さないこと (callModelDirect でガード)。 */
+  enableThinking?: boolean;
 };
 
 type OAIMessage =
@@ -217,9 +218,11 @@ function translateResponse(res: OAIResponse, model: string): Anthropic.Message {
     throw new Error("OpenAI: empty choices");
   }
   const content: Anthropic.ContentBlock[] = [];
-  // content が空でも reasoning_content に出力があれば拾う (Gemma/Qwen の thinking 抑制が
-  // server 側で無視された時の防御。strict な OpenAI 互換 server で当該フィールドが無くても無害)。
-  const textOut = choice.message.content || choice.message.reasoning_content || "";
+  // reasoning_content (思考) は**最終回答ではない**ので本文に混ぜない (#206 §8.9)。
+  // 混ぜると、思考が途中で max_tokens 打ち切り (finish=length) で content 空になった時に
+  // chain-of-thought がそのまま user に漏れる。content 空 (= 打ち切り/未生成) は呼側で扱う。
+  // (server 側で thinking を reasoning_content に分離する形式 = --reasoning-format deepseek 等が前提)
+  const textOut = choice.message.content || "";
   if (textOut.length > 0) {
     content.push({
       type: "text",
@@ -321,10 +324,10 @@ export async function callOpenAICompat(opts: OpenAICompatOpts): Promise<Anthropi
     messages,
   };
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
-  // ローカル thinking モデル (Gemma 3+/Qwen 3+) の内部考察を抑制。llama.cpp/vLLM は
-  // chat template に渡し、非対応 server は未知フィールドとして無視する。OpenAI/Grok には
-  // 送らない (= disableThinking は local_openai 時のみ true)。
-  if (opts.disableThinking) body.chat_template_kwargs = { enable_thinking: false };
+  // ローカル thinking モデル (Gemma 3+/Qwen 3+) の思考制御。llama.cpp/vLLM は chat template に
+  // 渡し、非対応 server は未知フィールドとして無視する。OpenAI/Grok には送らない
+  // (= enableThinking は callModelDirect で local_openai 時のみ渡される)。undefined は送らない。
+  if (opts.enableThinking !== undefined) body.chat_template_kwargs = { enable_thinking: opts.enableThinking };
   const tools = translateTools(opts.tools);
   if (tools) body.tools = tools;
   if (tools && opts.toolChoice) {

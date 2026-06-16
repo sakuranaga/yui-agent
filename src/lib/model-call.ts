@@ -24,6 +24,9 @@ export type DirectCallOpts = {
   maxTokens?: number;
   /** sampling temperature (未指定なら各 provider の API 既定)。 */
   temperature?: number;
+  /** ローカル thinking 制御 (#206 §8.9): false=抑制 / true=強制 ON / undefined=サーバ既定。
+   *  callModelDirect が local_openai の時だけアダプタへ渡す (hosted は無視)。 */
+  enableThinking?: boolean;
 };
 
 // 現状 provider ごとに単一 API キーを ai_settings に持つ前提なので、entry.apiKeyRef
@@ -118,8 +121,9 @@ export async function callModelDirect(
     tools: opts.tools,
     toolChoice: opts.toolChoice,
     temperature: opts.temperature,
-    // ローカル self-host (Gemma/Qwen) のみ thinking 抑制を送る。
-    disableThinking: entry.provider === "local_openai",
+    // thinking 制御 (#206 §8.9) はローカル self-host (Gemma/Qwen) のみに送る
+    // (hosted の openai/grok に chat_template_kwargs を送ると 400 になりうる)。
+    enableThinking: entry.provider === "local_openai" ? opts.enableThinking : undefined,
   });
 }
 
@@ -164,6 +168,7 @@ export async function testModelCapabilities(entry: ModelEntry): Promise<ModelCap
     const res = await callModelDirect(entry, {
       messages: [{ role: "user", content: "ping" }],
       maxTokens: 16,
+      enableThinking: false, // probe は抑制で高速 (§8.8)
     });
     const hasText = res.content.some((b) => b.type === "text" && b.text.trim().length > 0);
     if (!hasText) {
@@ -178,21 +183,54 @@ export async function testModelCapabilities(entry: ModelEntry): Promise<ModelCap
     return cap; // 到達できなければ tool 判定はしない
   }
 
-  // ② tool-use probe (echo を強制 → tool_use ブロックが返れば対応)
-  try {
-    const res = await callModelDirect(entry, {
-      messages: [{ role: "user", content: "Use the echo tool to echo the word: hello" }],
-      tools: [PROBE_TOOL],
-      toolChoice: { name: "echo" },
-      maxTokens: 128,
-    });
-    cap.supportsTools = res.content.some((b) => b.type === "tool_use");
-    if (!cap.supportsTools) cap.lastError = "tool_use 応答なし (= 非対応の可能性)";
-  } catch (e) {
-    // tools を受け付けない endpoint は 4xx 等で throw → 非対応扱い (到達は OK のまま)
-    console.warn(`[model-test] ${entry.label} tool probe failed:`, e instanceof Error ? e.message : e);
+  // ② tool-use probe (echo を強制 → tool_use ブロックが返れば対応)。
+  //   戻り値: true=tool_use 有り / false=2xx だが tool_use 無し / null=例外 (4xx 等)
+  let probeErr: unknown = null;
+  const probeOnce = async (enableThinking: boolean): Promise<boolean | null> => {
+    try {
+      const res = await callModelDirect(entry, {
+        messages: [{ role: "user", content: "Use the echo tool to echo the word: hello" }],
+        tools: [PROBE_TOOL],
+        toolChoice: { name: "echo" },
+        maxTokens: 128,
+        enableThinking,
+      });
+      return res.content.some((b) => b.type === "tool_use");
+    } catch (e) {
+      probeErr = e;
+      console.warn(
+        `[model-test] ${entry.label} tool probe (thinking=${enableThinking}) failed:`,
+        e instanceof Error ? e.message : e
+      );
+      return null;
+    }
+  };
+
+  const first = await probeOnce(false);
+  if (first === true) {
+    cap.supportsTools = true;
+  } else if (first === false && entry.provider === "local_openai") {
+    // 2xx だが tool_use 無し + local → 推論モデルが思考しないと tool を返さない可能性。
+    // thinking ON で 1 回だけ再 probe (§8.8.3、GPT-OSS 等の false negative 回避)。
+    const second = await probeOnce(true);
+    if (second === true) {
+      cap.supportsTools = true;
+      cap.toolUseRequiresThinking = true;
+      cap.lastError = null; // クリーンな成功 (UI で「成功だがエラー」に見せない)
+      console.info(`[model-test] ${entry.label}: tool は thinking ON でのみ対応 (toolUseRequiresThinking)`);
+    } else {
+      cap.supportsTools = false;
+      cap.lastError =
+        second === null ? `tool 非対応 (${categorizeErr(probeErr)})` : "tool_use 応答なし (thinking ON でも不成立)";
+    }
+  } else if (first === false) {
+    // hosted で 2xx だが tool_use 無し (再 probe しない)
     cap.supportsTools = false;
-    cap.lastError = `tool 非対応 (${categorizeErr(e)})`;
+    cap.lastError = "tool_use 応答なし (= 非対応の可能性)";
+  } else {
+    // first === null: 例外 (4xx 等)。tools を受け付けない endpoint 等 → 非対応扱い。
+    cap.supportsTools = false;
+    cap.lastError = `tool 非対応 (${categorizeErr(probeErr)})`;
   }
 
   return cap;

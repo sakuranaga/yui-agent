@@ -370,6 +370,120 @@ M1-M4 でレジストリ経路が稼働。残るは `callLlm` を経由しない
 
 ---
 
+## 8.8 thinking 抑制の tier 化 (post-M5、強ローカルモデル対応)
+
+### 8.8.1 背景・問題
+
+M5 で `disableThinking` (`chat_template_kwargs:{enable_thinking:false}`) を **provider 一律** (`entry.provider==='local_openai'`) で送るようにした。これは「ローカル = Gemma 12B 等の小型モデルが背景 JSON タスクを即答する」前提では正しい (thinking が JSON content を空にする事故を防ぐ)。
+
+しかし**強力な推論ローカルモデル (例: GPT-OSS 120B) を main に据える**ケースでは逆効果になる。main/heavy はエージェント的なツール使い・会話で、**思考させた方が質が上がる**のに、provider 一律抑制だと 120B の頭を活かしきれない。
+
+### 8.8.2 設計: 抑制を tier 単位にする
+
+thinking 制御 (M5 の `disableThinking` boolean、§8.9.3 で `enableThinking?` tri-state に統合) の決定を **provider 単位 → tier 単位**に変える:
+
+| 経路 | enableThinking (auto 時) | 意図 |
+|---|---|---|
+| 実 `callLlm`、**sub** tier | **false** (抑制) | 背景 JSON 即答 (Gemma extract 等)。現挙動保存。 |
+| 実 `callLlm`、**main / heavy** tier | **undefined** (送らない=サーバ既定) | 推論モデル (Qwen3.6 等、既定 ON) の思考を活かす。強制 ON は §8.9 の明示 `'on'`。 |
+| 能力プローブ (`testModelCapabilities`) | **false** (抑制) | 高速・確実な tool_call。 |
+| hosted (anthropic/openai/gemini/grok) | (送らない=undefined) | `chat_template_kwargs` は未知フィールド → 400 防止。tier 不問。 |
+
+(↑ auto モードの既定。§8.9 で entry 単位 on/off 上書き可。) **最終ガード**: `callModelDirect` は `entry.provider==='local_openai'` の時だけ `enableThinking` を `callOpenAICompat` に渡す → hosted には絶対漏れない。
+
+### 8.8.3 実装
+
+> **用語注**: §8.9.3 で `disableThinking:boolean` は **`enableThinking?:boolean` (tri-state、undefined=送らない)** に統合する。以下「disableThinking=true」は「enableThinking=false」、「=false (送らない)」は「enableThinking=undefined or true」に読み替え。§8.8 単独では tier 二値だが、§8.9 の per-entry 上書きで on/off も乗る。実装は §8.9.3 の表を最終仕様とする。
+
+- `DirectCallOpts.enableThinking?: boolean` を追加 (undefined=送らない)。`callModelDirect` は `entry.provider==='local_openai'` の時だけ `opts.enableThinking` を `callOpenAICompat` に渡す (= caller が決める。hosted には送らない)。
+- `attemptWithEntry(role, entry, tier, opts)` に **tier を引数追加**し、§8.9.3 の `thinkingMode + tier` 解決で `enableThinking` を決めて `callModelDirect` に渡す (auto+sub→false, auto+main/heavy→undefined(送らない), off→false, on→true)。
+- `callLlm`: primary・fallback とも `resolveEntry`/`resolveTier(role)` で得た **同じ tier** を `attemptWithEntry` に渡す。
+- `testModelCapabilities`: ping・tool probe の `callModelDirect` 呼びに `enableThinking: false` を明示 (probe は抑制で高速)。
+- **probe の false-negative 回避 (GPT-OSS 対応の要)**: tool probe が **2xx だが tool_use 無し** (= 例外/4xx ではなく「到達して応答したが tool を返さなかった」) かつ `provider==='local_openai'` の場合**のみ**、**`enableThinking:true` で 1 回だけ再 probe** する (Codex Low: 4xx や例外は本当に tool 非対応の可能性が高いので再 probe しない。unknown-field 400 は reachable 側で落とす既知エッジと整合)。推論モデル (GPT-OSS 等) が「思考しないと tool_call を返せない」ケースで、実運用では使えるのに main/heavy 割当不能になるのを防ぐ。再 probe で tool_use が返れば `supportsTools=true`。この時 **`lastError=null` (= クリーンな成功)** とし、「thinking ON が必要だった」旨は `console.info` ログにのみ出す。hosted は再 probe しない (thinking-off を送っていないため意味が無い)。
+- **`capabilities.toolUseRequiresThinking` を記録 (Codex High、§8.9 と整合)**: thinking-off probe で tool_use 無し → thinking-on 再 probe で成功、の経路を通った時だけ `toolUseRequiresThinking=true` を capabilities に保存する。これは「このモデルは tool を thinking ON でしか返せない」印で、§8.9 の `thinkingMode='off'` との矛盾検出に使う (= off にすると main/heavy で tool が壊れる)。thinking-off probe が直接成功したモデル (Qwen3.6 で実機確認: off でも tool_call を返す) は `false`。
+
+### 8.8.4 挙動保存・安全性
+
+- sub local (Gemma extract/mail_curate 等) → 従来通り thinking 抑制。**リグレッション無し**。
+- main/heavy local (新: Qwen3.6) → auto では `chat_template_kwargs` を**送らない** (= サーバ既定 ON) ので thinking 維持 (= 改善)。非 thinking ローカルモデルでも送らないので無害。
+- hosted → `chat_template_kwargs` を一切送らない (現状維持)。
+- probe → 従来通り抑制 (false negative 回避は **tool_choice 強制 + local の thinking-on 再 probe** の二段で担保)。
+- **reasoning_content を本文に混ぜない (実機で判明、M5 の fallback を撤去)**: M5 では content 空時に `content || reasoning_content` で reasoning を拾っていたが、思考 ON のモデルが max_tokens 打ち切り (finish=length) で content 空になると **chain-of-thought がそのまま user に漏れる**事故が起きた (実機: Qwen3.6 で思考分析・"Plan:/Draft:"・別言語が応答本文に出た)。→ `translateResponse` は **content のみ**を本文にし、reasoning_content は混ぜない。前提として server 側で thinking を reasoning_content に分離 (`--reasoning-format deepseek` 等)。content 空 (= 打ち切り/未生成) は呼側で扱う (= 生の思考を見せるより空が正しい)。思考 ON を使うなら max_tokens を十分大きく取ること。
+
+### 8.8.5 注意・将来
+
+- 推論モデルは出力 token を食う。main は `MAX_TOKENS` 大なので通常 OK。GPT-OSS で出力枯渇が出たら `max_tokens`/`n_ctx` 側で調整 (モデル設定の範囲)。
+- `openai.ts` の `isReasoningModel` (gpt-5/o-series の名前 prefix 判定) はローカルの "gpt-oss-120b" 等にマッチしない。現状 main は明示 `maxTokens` を渡すので影響軽微だが、必要なら別途検討。
+- **将来拡張**: entry 単位で「思考モード」を明示する設定 (UI トグル) も可能。ただし tier 自動で主要ケースは賄えるので MVP は tier ベース。
+- **エッジ (Codex 低-2)**: ping/probe とも最初に `enableThinking:false` (= `chat_template_kwargs` を送る) なので、**unknown field に 400 を返す厳格な OpenAI 互換サーバ**だと `reachable=false` になる。これは M5 の provider 一律送信でも既に同じなので新規リグレッションではない。vLLM / llama.cpp は `chat_template_kwargs` を受理するので Qwen3.6 サーバは問題なし (実機確認済)。万一該当したら、将来 `HTTP 400 (unknown chat_template_kwargs)` 時だけ `chat_template_kwargs` 無しで ping 再試行する余地あり (今回は対象外)。
+
+### 8.8.6 テスト (Codex 低-2: 層を分けて検証)
+
+- **callModelDirect 直接** (tier 非関与): `opts.enableThinking:false` + local → body `chat_template_kwargs.enable_thinking===false`、`enableThinking:true` + local → `===true`、local + `undefined` → `chat_template_kwargs` 無し、hosted は値に関わらず無し。
+- **thinkingMode/tier → enableThinking のマッピング** は `callLlm`/`attemptWithEntry` 経由の fetch stub で: off→`enable_thinking:false` / on→`true` / auto+sub→`false` / auto+main→`chat_template_kwargs` 無し / hosted→無し。
+- **probe**: thinking-off で tool_use 無し → local なら enableThinking:true 再 probe して supportsTools 判定 + toolUseRequiresThinking=true (mock endpoint: 1 回目 text、2 回目 tool_use)。hosted は再 probe しない。
+
+---
+
+## 8.9 思考モードの per-entry 設定 (UI トグル)
+
+### 8.9.1 動機・実機確認
+
+ご主人様が「設定で thinking ON/OFF を切り替えたい」。理由は速度: 推論モデルは思考分の生成で遅くなる。Qwen3.6-35B-A3B (`100.92.99.16:8081`) で実機確認:
+
+| mode | reasoning | 応答時間 |
+|---|---|---|
+| 思考 ON (default) | 499 字 | 5382ms |
+| `enable_thinking:false` | **0 字** | **501ms** (約 10x 高速) |
+
+→ Qwen3 系は M5 の `chat_template_kwargs:{enable_thinking:false}` が**完全にクリーンに効く**。GPT-OSS (harmony 形式、`enable_thinking` では切れず `reasoning_effort` が必要) とは違い、追加機構は不要。**§8.8 (tier 化) に「per-entry の明示上書き」を足す**形にする。
+
+### 8.9.2 データモデル
+
+`model_registry` に **`thinking_mode TEXT NOT NULL DEFAULT 'auto'`** 追加 (migration **0070**)。値: `'auto' | 'on' | 'off'`。**`CHECK (thinking_mode IN ('auto','on','off'))` 制約も付ける** (Codex Medium-2: PATCH validation だけだと seed/直接 SQL で壊れた値が入り得る)。schema + `ModelEntry.thinkingMode` 型 + CRUD (createModel / updateModel / PATCH route / GET) に追加。`capabilities` に `toolUseRequiresThinking?: boolean` も追加 (§8.8.3、ModelCapabilities 型)。
+
+### 8.9.3 解決ロジック (§8.8 を内包)
+
+**機構は tri-state にする (Codex Medium-1)**: `'on'` を「OFF 指示を送らない」ではなく「**明示的に思考 ON**」にするため、`disableThinking:boolean` を **`enableThinking?: boolean`** (undefined = フィールド自体を送らない) に変更する:
+- `enableThinking===false` → `chat_template_kwargs:{enable_thinking:false}`
+- `enableThinking===true`  → `chat_template_kwargs:{enable_thinking:true}` (Qwen はサーバ既定が OFF でも強制 ON にできる)
+- `undefined` → 送らない (hosted・非対象)
+
+`attemptWithEntry` で `enableThinking` を **entry.thinkingMode + tier** から決定:
+
+| thinkingMode | enableThinking | body |
+|---|---|---|
+| `'off'` | false | `enable_thinking:false` (常時抑制、速度優先) |
+| `'on'` | true | `enable_thinking:true` (常時思考、強制 ON) |
+| `'auto'` (既定) | sub→false / **main・heavy→undefined** | sub のみ `enable_thinking:false`、main/heavy は**送らない** (= サーバ既定。Qwen は既定 ON。Codex Medium: auto で `true` を送ると厳格サーバが 400 になり得るため、強制 ON は明示 `'on'` のみ) |
+
+`callModelDirect` は `entry.provider==='local_openai'` の時だけ `enableThinking` を `callOpenAICompat` に渡す (hosted には絶対送らない)。§8.8 の tier 自動は「auto モード」に格上げ、ユーザーが entry 単位で on/off 上書き可能。
+
+### 8.9.4 UI
+
+- **local_openai entry** の行 (または編集フォーム) に「思考」セレクタ: **自動 / ON / OFF** (既定 自動)。`PATCH /api/model-registry/[id]` で `thinkingMode` を保存。
+- **hosted entry** は思考制御が別系統 (Anthropic adaptive / OpenAI reasoning_effort) なので、このセレクタは**非表示** (= local 専用設定であることを明示)。PATCH は hosted の `thinkingMode` を **無視** (= 保存しても runtime で使われない)。API 利用者向けに「local_openai のみ有効」と明記 (Codex Low-1)。
+- **`toolUseRequiresThinking=true` の entry で `OFF` を選ぼうとした時の警告 (Codex High)**: そのモデルは tool を thinking ON でしか返せないので、OFF にすると main/heavy で tool が壊れる。UI で OFF 選択肢に警告 (「このモデルは思考 ON でないと tool を使えません」) を出し、main/heavy 割当中なら OFF を**非推奨/警告表示**にする。Qwen3.6 は `toolUseRequiresThinking=false` なので警告は出ない。
+
+### 8.9.5 mechanism / 将来
+
+- 送るのは `chat_template_kwargs:{enable_thinking: <bool>}` (§8.9.3 の tri-state)。Qwen3 / Gemma に clean に効く (実機確認: Qwen3.6 OFF=reasoning0字/501ms、ON=499字/5382ms、tool は両モードで返る)。
+- GPT-OSS (harmony) を将来使うなら `enable_thinking` では不十分で `reasoning_effort:'low'` 等が要る → その時に provider/model 系統別の control 分岐を足す拡張ポイント (現状 Qwen3.6 採用のため対象外)。
+
+### 8.9.6 挙動保存
+
+- 既存 local (Gemma) は `thinking_mode='auto'` default → tier ベース → sub=抑制 (現状維持)。**リグレッション無し**。
+- hosted 影響なし。
+- 能力プローブは §8.8 通り (thinking-off 優先 + local の thinking-on 再 probe)。thinkingMode 設定は probe には使わない (probe は capability 判定であって運用設定ではない)。
+
+### 8.9.7 テスト
+
+- `thinking_mode` off/on/auto × tier (sub/main) → `enableThinking` (false/true/undefined) と body `chat_template_kwargs.enable_thinking` の有無・値 (callLlm fetch stub)。
+- CRUD: thinking_mode 保存・取得、PATCH 更新。
+- migration: default 'auto'、既存行に 'auto' が入る。
+
+---
+
 ## 9. テスト
 
 - レジストリ CRUD + 移行 seed (既存値 → entry/割当の正しい変換)。
@@ -388,7 +502,7 @@ M1-M4 でレジストリ経路が稼働。残るは `callLlm` を経由しない
 - `src/lib/model-registry.ts` — registry CRUD / tier 割当 / role 上書き / 移行 (M3 local roles・M5 intent roles)
 - `src/lib/model-tier-gate.ts` — checkToolSlots / roleRequiresTool / findEntryReferences
 - `src/lib/ai-settings.ts` — 設定キー / getAnthropicConfig / getLocalLlmConfig / SECRET_KEYS (旧キーは seed/ephemeral fallback source として温存)
-- `src/lib/llm-providers/` — detect / openai (temperature・disableThinking・reasoning_content) / gemini (temperature) (+ grok は openai 互換)
+- `src/lib/llm-providers/` — detect / openai (temperature・enableThinking tri-state・reasoning_content) / gemini (temperature) (+ grok は openai 互換)
 - `src/app/api/model-registry/` — route (list/create) / [id] (PATCH/DELETE) / [id]/test / tiers (GET/PUT)
 - `src/components/{AiSettingsSection,ModelRegistryManager}.tsx` — 設定 UI
 - `src/lib/crypto.ts` — API キー暗号化 / `src/lib/url-validate.ts` — public URL 検証 (local は `sanitizeLocalBaseUrl` で別扱い)

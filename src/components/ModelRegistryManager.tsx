@@ -19,7 +19,10 @@ type Capabilities = {
   supportsTools?: boolean;
   testedAt?: string | null;
   lastError?: string | null;
+  toolUseRequiresThinking?: boolean;
 };
+
+type ThinkingMode = "auto" | "on" | "off";
 
 type ModelEntry = {
   id: string;
@@ -29,6 +32,7 @@ type ModelEntry = {
   baseUrl: string | null;
   apiKeyRef: string | null;
   capabilities: Capabilities;
+  thinkingMode: ThinkingMode;
 };
 
 type TierName = "main" | "sub" | "heavy";
@@ -199,6 +203,22 @@ export default function ModelRegistryManager() {
     }
   };
 
+  const setThinkingMode = async (id: string, mode: ThinkingMode) => {
+    // 楽観更新 + PATCH。失敗時は load() で戻す。
+    setEntries((es) => es.map((e) => (e.id === id ? { ...e, thinkingMode: mode } : e)));
+    try {
+      const res = await fetch(`/api/model-registry/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ thinkingMode: mode }),
+      });
+      if (!res.ok) await load();
+    } catch (e) {
+      console.warn("[model-registry] thinkingMode update failed:", e);
+      await load();
+    }
+  };
+
   const submitForm = async () => {
     setFormErr(null);
     const payload = {
@@ -325,6 +345,19 @@ export default function ModelRegistryManager() {
                   <CapBadge label="tool" state={e.capabilities.supportsTools} />
                   {e.capabilities.lastError && <span className="ai-cap-err">{e.capabilities.lastError}</span>}
                 </div>
+                {e.provider === "local_openai" && (
+                  <div className="ai-thinking-row">
+                    <span className="ai-thinking-label">思考</span>
+                    <select className="ai-input ai-thinking-select" value={e.thinkingMode} onChange={(ev) => void setThinkingMode(e.id, ev.target.value as ThinkingMode)}>
+                      <option value="auto">自動 (tier 既定)</option>
+                      <option value="on">ON (常時思考)</option>
+                      <option value="off">OFF (速度優先)</option>
+                    </select>
+                    {e.thinkingMode === "off" && e.capabilities.toolUseRequiresThinking && (
+                      <span className="ai-cap-err">このモデルは思考 ON でないと tool を使えません</span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="ai-model-actions">
                 <button type="button" className="ai-test-btn" onClick={() => void testEntry(e.id)} disabled={testingId === e.id}>

@@ -35,10 +35,11 @@ function localEntry(baseUrl: string): ModelEntry {
     baseUrl,
     apiKeyRef: null,
     capabilities: {},
+    thinkingMode: "auto",
   };
 }
 
-type ServerMode = "tools-ok" | "tools-400" | "text-only";
+type ServerMode = "tools-ok" | "tools-400" | "text-only" | "tools-need-thinking";
 
 /** OpenAI 互換 /chat/completions のモック。mode で挙動を切替。 */
 function startMockServer(mode: ServerMode): Promise<{ baseUrl: string; close: () => Promise<void> }> {
@@ -47,8 +48,22 @@ function startMockServer(mode: ServerMode): Promise<{ baseUrl: string; close: ()
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
-        const parsed = JSON.parse(body || "{}") as { tools?: unknown[] };
+        const parsed = JSON.parse(body || "{}") as { tools?: unknown[]; chat_template_kwargs?: { enable_thinking?: boolean } };
         const hasTools = Array.isArray(parsed.tools) && parsed.tools.length > 0;
+        const thinkingOn = parsed.chat_template_kwargs?.enable_thinking === true;
+
+        // 思考 ON でのみ tool を返すモデル (= §8.8.3 再 probe の対象)。
+        // thinking-off (enable_thinking:false) では text、thinking-on で tool_use。
+        if (hasTools && mode === "tools-need-thinking") {
+          if (thinkingOn) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ id: "m", model: "mock", choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "echo", arguments: "{}" } }] }, finish_reason: "tool_calls" }], usage: {} }));
+          } else {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ id: "m", model: "mock", choices: [{ index: 0, message: { role: "assistant", content: "no tool" }, finish_reason: "stop" }], usage: {} }));
+          }
+          return;
+        }
 
         // tool 付きリクエストを受け付けない endpoint をシミュレート (= 4xx)
         if (hasTools && mode === "tools-400") {
@@ -159,6 +174,18 @@ async function main() {
     check(cap.reachable === false, "reachable = false");
     check(cap.supportsTools === false, "supportsTools = false");
     check(!!cap.lastError, "lastError あり (接続失敗カテゴリ)");
+  }
+
+  // --- 4b. thinking ON でのみ tool を返すモデル → 再 probe で supportsTools=true ---
+  console.log("[4b] thinking 必須モデルの再 probe (§8.8.3)");
+  {
+    const srv = await startMockServer("tools-need-thinking");
+    const cap = await testModelCapabilities(localEntry(srv.baseUrl));
+    await srv.close();
+    check(cap.reachable === true, "reachable = true");
+    check(cap.supportsTools === true, "supportsTools = true (thinking-on 再 probe で成立)");
+    check(cap.toolUseRequiresThinking === true, "toolUseRequiresThinking = true");
+    check(!cap.lastError, "lastError なし (クリーンな成功)");
   }
 
   // --- 5. provider 別 tool_choice の送信形 (アダプタ変換ロジック) ---
@@ -284,8 +311,8 @@ async function main() {
     }
   }
 
-  // --- 7. temperature / disableThinking / reasoning_content (#206 M5) ---
-  console.log("[7] temperature / disableThinking / reasoning_content");
+  // --- 7. temperature / enableThinking / reasoning_content (#206 M5 + §8.9) ---
+  console.log("[7] temperature / enableThinking / reasoning_content");
   {
     const origFetch = globalThis.fetch;
     let captured: Record<string, unknown> = {};
@@ -302,20 +329,30 @@ async function main() {
       await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }], temperature: 0.2 });
       check(captured.temperature === 0.2, "openai: temperature が body に乗る");
 
-      // openai: disableThinking → chat_template_kwargs
+      // openai: enableThinking=false → chat_template_kwargs:{enable_thinking:false}
       stub(oai({ content: "ok" }));
-      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }], disableThinking: true });
-      check(JSON.stringify(captured.chat_template_kwargs) === JSON.stringify({ enable_thinking: false }), "openai: disableThinking → chat_template_kwargs");
+      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }], enableThinking: false });
+      check(JSON.stringify(captured.chat_template_kwargs) === JSON.stringify({ enable_thinking: false }), "openai: enableThinking=false → enable_thinking:false");
 
-      // openai: disableThinking 無しなら送らない
+      // openai: enableThinking=true → chat_template_kwargs:{enable_thinking:true}
+      stub(oai({ content: "ok" }));
+      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }], enableThinking: true });
+      check(JSON.stringify(captured.chat_template_kwargs) === JSON.stringify({ enable_thinking: true }), "openai: enableThinking=true → enable_thinking:true");
+
+      // openai: enableThinking undefined なら送らない
       stub(oai({ content: "ok" }));
       await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }] });
-      check(captured.chat_template_kwargs === undefined, "openai: disableThinking 無しなら chat_template_kwargs 無し");
+      check(captured.chat_template_kwargs === undefined, "openai: enableThinking 無しなら chat_template_kwargs 無し");
 
-      // openai: content 空 + reasoning_content → text に拾う
+      // openai: content 空 + reasoning_content → 本文に**混ぜない** (思考漏れ防止、§8.9)
       stub(oai({ content: null, reasoning_content: "thought" }));
       const r = await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }] });
-      check(r.content.some((b) => b.type === "text" && b.text === "thought"), "openai: content 空 → reasoning_content を text に拾う");
+      check(!r.content.some((b) => b.type === "text" && b.text.includes("thought")), "openai: content 空でも reasoning_content を本文に混ぜない");
+
+      // openai: content あり → content をそのまま使う
+      stub(oai({ content: "answer", reasoning_content: "thought" }));
+      const r2 = await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }] });
+      check(r2.content.some((b) => b.type === "text" && b.text === "answer"), "openai: content があれば content を使う (reasoning は無視)");
 
       // gemini: temperature が generationConfig に乗る
       stub({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }], usageMetadata: {} });

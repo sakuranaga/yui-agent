@@ -96,6 +96,7 @@ function ephemeralEntry(modelId: string): ModelEntry {
     baseUrl: null,
     apiKeyRef: provider === "local_openai" ? null : provider,
     capabilities: {},
+    thinkingMode: "auto",
   };
 }
 
@@ -304,13 +305,26 @@ export type CallLlmOpts = {
  * 1 つの entry で messages.create を実行 (retry + log + トレース集計込み)。
  * provider 別 dispatch は M2 の callModelDirect に委譲。失敗時は throw (= 呼側で tier fallback)。
  */
+/**
+ * entry.thinkingMode + tier から enableThinking を決める (#206 §8.9.3)。
+ *   off → false (抑制) / on → true (強制) / auto → sub は false、main/heavy は undefined (サーバ既定)。
+ * callModelDirect が local_openai 以外には渡さないので、ここでは provider を見ない。
+ */
+export function resolveEnableThinking(entry: ModelEntry, tier: TierName): boolean | undefined {
+  if (entry.thinkingMode === "off") return false;
+  if (entry.thinkingMode === "on") return true;
+  return tier === "sub" ? false : undefined; // auto
+}
+
 async function attemptWithEntry(
   role: LlmRole,
   entry: ModelEntry,
+  tier: TierName,
   opts: CallLlmOpts
 ): Promise<Anthropic.Message> {
   const maxTokens = opts.maxTokens ?? 1024;
   const retryEnabled = opts.retry !== false;
+  const enableThinking = resolveEnableThinking(entry, tier);
   // local (= 自前ホスト) はコスト 0 で記録。PRICE 未知で Sonnet 単価に化けるのを防ぐ。
   const isLocal = entry.provider === "local_openai";
 
@@ -327,6 +341,7 @@ async function attemptWithEntry(
         tools: opts.tools,
         maxTokens,
         temperature: opts.temperature,
+        enableThinking,
       });
 
       const dur = Date.now() - t0;
@@ -349,8 +364,10 @@ async function attemptWithEntry(
 
       const tracePart = trace ? ` trace=${trace.traceId}` : "";
       const attemptPart = attempt > 0 ? ` retries=${attempt}` : "";
+      // think= は local の thinking 制御 (#206 §8.9): false=抑制 / true=強制 / -=未送信(サーバ既定)
+      const thinkPart = isLocal ? ` think=${enableThinking ?? "-"}` : "";
       console.log(
-        `[llm:${role}] model=${entry.modelId} provider=${entry.provider} in=${inT} out=${outT} cache_r=${cacheR} cache_w=${cacheW} $${cost.toFixed(5)} ${dur}ms${attemptPart}${tracePart}`
+        `[llm:${role}] model=${entry.modelId} provider=${entry.provider} in=${inT} out=${outT} cache_r=${cacheR} cache_w=${cacheW} $${cost.toFixed(5)} ${dur}ms${thinkPart}${attemptPart}${tracePart}`
       );
       recordEvent({
         type: "call",
@@ -396,7 +413,7 @@ export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthrop
   const { entry, tier } = await resolveEntry(role, opts.model);
 
   try {
-    return await attemptWithEntry(role, entry, opts);
+    return await attemptWithEntry(role, entry, tier, opts);
   } catch (primaryErr) {
     // tier fallback: 別 entry が設定されていれば 1 回だけ切替再試行 (primary と同一なら skip)。
     const fallback = await getTierFallback();
@@ -409,7 +426,8 @@ export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthrop
           primaryErr instanceof Error ? primaryErr.message : primaryErr
         );
         try {
-          return await attemptWithEntry(role, fbEntry, opts);
+          // fallback も同じ tier (resolveTier(role)) の性質で thinking 解決。
+          return await attemptWithEntry(role, fbEntry, tier, opts);
         } catch (fbErr) {
           // fallback も失敗 → 設計 §8.5.4 通り primary の error を投げる (原因追跡用に fallback error は warn)。
           console.warn(

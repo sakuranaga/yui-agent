@@ -749,7 +749,13 @@ export type ModelCapabilities = {
   supportsTools?: boolean;
   testedAt?: string; // ISO
   lastError?: string | null;
+  /** tool を thinking ON でしか返せないモデル (#206 §8.8.3)。thinking-off probe で
+   *  tool 不成立 → thinking-on 再 probe で成立、の時に true。thinkingMode='off' との
+   *  矛盾 (off にすると main/heavy で tool が壊れる) 検出に使う。 */
+  toolUseRequiresThinking?: boolean;
 };
+/** ローカルモデルの thinking 制御 (#206 §8.9)。local_openai のみ有効。 */
+export type ThinkingMode = "auto" | "on" | "off";
 export const modelRegistry = pgTable(
   "model_registry",
   {
@@ -760,6 +766,7 @@ export const modelRegistry = pgTable(
     baseUrl: text("base_url"),
     apiKeyRef: text("api_key_ref"),
     capabilities: jsonb("capabilities").$type<ModelCapabilities>().notNull().default({}),
+    thinkingMode: text("thinking_mode").$type<ThinkingMode>().notNull().default("auto"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

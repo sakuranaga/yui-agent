@@ -26,18 +26,35 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const entry = await getModel(id);
     if (!entry) return NextResponse.json({ error: "モデルが見つかりません" }, { status: 404 });
 
-    let body: { label?: string; modelId?: string; baseUrl?: string };
+    let body: { label?: string; modelId?: string; baseUrl?: string; thinkingMode?: string };
     try {
       body = (await req.json()) as typeof body;
     } catch {
       return NextResponse.json({ error: "JSON が不正です" }, { status: 400 });
     }
 
-    const patch: { label?: string; modelId?: string; baseUrl?: string | null; capabilities?: Record<string, never> } = {};
+    const patch: {
+      label?: string;
+      modelId?: string;
+      baseUrl?: string | null;
+      capabilities?: Record<string, never>;
+      thinkingMode?: "auto" | "on" | "off";
+    } = {};
     if (body.label !== undefined) {
       const label = body.label.trim();
       if (!label) return NextResponse.json({ error: "ラベルは空にできません" }, { status: 400 });
       patch.label = label;
+    }
+
+    // thinking モードは local_openai のみ有効 (#206 §8.9)。hosted では無視 (= 保存しない)。
+    if (body.thinkingMode !== undefined) {
+      if (!["auto", "on", "off"].includes(body.thinkingMode)) {
+        return NextResponse.json({ error: "thinkingMode は auto/on/off のみです" }, { status: 400 });
+      }
+      if (entry.provider === "local_openai") {
+        patch.thinkingMode = body.thinkingMode as "auto" | "on" | "off";
+      }
+      // hosted は無視 (UI でも非表示。runtime で使われない)。
     }
 
     // modelId / baseUrl の変更は「実体が変わる」= 古い能力テスト結果を持ち越せない (§8.6.1 高-1)。

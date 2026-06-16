@@ -10,7 +10,8 @@
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { resolveTier, resolveEntry, callLlm, type LlmRole } from "@/lib/llm";
+import { resolveTier, resolveEntry, resolveEnableThinking, callLlm, type LlmRole } from "@/lib/llm";
+import type { ModelEntry } from "@/lib/model-registry";
 import {
   createModel,
   deleteModel,
@@ -222,6 +223,21 @@ async function main() {
         const r2 = await migrateIntentRolesToLocal();
         check(r2.migrated === false, "2 回目は冪等 (migrated=false)");
       }
+    }
+
+    // ── 8. resolveEnableThinking (thinkingMode × tier、#206 §8.9) ──
+    console.log("[8] resolveEnableThinking");
+    {
+      const mk = (mode: "auto" | "on" | "off"): ModelEntry => ({
+        id: "x", label: "x", provider: "local_openai", modelId: "m", baseUrl: "http://x/v1",
+        apiKeyRef: null, capabilities: {}, thinkingMode: mode,
+      });
+      check(resolveEnableThinking(mk("off"), "main") === false, "off → false (tier 不問)");
+      check(resolveEnableThinking(mk("off"), "sub") === false, "off → false (sub も)");
+      check(resolveEnableThinking(mk("on"), "sub") === true, "on → true (tier 不問)");
+      check(resolveEnableThinking(mk("auto"), "sub") === false, "auto + sub → false (抑制)");
+      check(resolveEnableThinking(mk("auto"), "main") === undefined, "auto + main → undefined (サーバ既定)");
+      check(resolveEnableThinking(mk("auto"), "heavy") === undefined, "auto + heavy → undefined");
     }
 
     // ── summary ──

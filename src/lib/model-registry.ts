@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { db } from "@/db/client";
-import { modelRegistry, aiSettings, type ModelCapabilities } from "@/db/schema";
+import { modelRegistry, aiSettings, type ModelCapabilities, type ThinkingMode } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import {
   getAiSetting,
@@ -32,6 +32,7 @@ export type ModelEntry = {
   baseUrl: string | null;
   apiKeyRef: string | null;
   capabilities: ModelCapabilities;
+  thinkingMode: ThinkingMode;
 };
 
 export type TierAssignment = Record<TierName, string | null>;
@@ -46,6 +47,7 @@ function rowToEntry(r: typeof modelRegistry.$inferSelect): ModelEntry {
     baseUrl: r.baseUrl,
     apiKeyRef: r.apiKeyRef,
     capabilities: r.capabilities ?? {},
+    thinkingMode: r.thinkingMode ?? "auto",
   };
 }
 
@@ -68,6 +70,7 @@ export async function createModel(input: {
   baseUrl?: string | null;
   apiKeyRef?: string | null;
   capabilities?: ModelCapabilities;
+  thinkingMode?: ThinkingMode;
 }): Promise<ModelEntry> {
   const id = randomUUID();
   const [row] = await db
@@ -80,6 +83,7 @@ export async function createModel(input: {
       baseUrl: input.baseUrl ?? null,
       apiKeyRef: input.apiKeyRef ?? null,
       capabilities: input.capabilities ?? {},
+      thinkingMode: input.thinkingMode ?? "auto",
     })
     .returning();
   return rowToEntry(row);
@@ -94,6 +98,7 @@ export async function updateModel(
     baseUrl: string | null;
     apiKeyRef: string | null;
     capabilities: ModelCapabilities;
+    thinkingMode: ThinkingMode;
   }>
 ): Promise<ModelEntry | null> {
   const set: Record<string, unknown> = { updatedAt: new Date() };
@@ -103,6 +108,7 @@ export async function updateModel(
   if (patch.baseUrl !== undefined) set.baseUrl = patch.baseUrl;
   if (patch.apiKeyRef !== undefined) set.apiKeyRef = patch.apiKeyRef;
   if (patch.capabilities !== undefined) set.capabilities = patch.capabilities;
+  if (patch.thinkingMode !== undefined) set.thinkingMode = patch.thinkingMode;
   const [row] = await db
     .update(modelRegistry)
     .set(set)

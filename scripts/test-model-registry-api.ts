@@ -39,6 +39,7 @@ function entry(id: string, supportsTools: boolean | undefined): ModelEntry {
   return {
     id, label: id, provider: "anthropic", modelId: "m", baseUrl: null, apiKeyRef: "anthropic",
     capabilities: supportsTools === undefined ? {} : { supportsTools, reachable: true },
+    thinkingMode: "auto",
   };
 }
 
@@ -189,6 +190,26 @@ async function main() {
       // 同じ未テスト entry を judge (sub role) に直指定 → tool 不問 → 200
       const subOv2 = await putTiersRoute(jsonReq("PUT", { roleOverrides: { judge: ut.id } }));
       check(subOv2.status === 200, "judge(sub) に未テスト entry を直指定 → 200");
+    }
+
+    // ── 9. thinkingMode PATCH (§8.9) ──
+    console.log("[9] thinkingMode PATCH");
+    {
+      const loc = await createModel({ label: "tm-local", provider: "local_openai", modelId: "g", baseUrl: "http://10.0.0.20:8000/v1" });
+      createdIds.push(loc.id);
+      const ok = await patchModelRoute(jsonReq("PATCH", { thinkingMode: "off" }), { params: Promise.resolve({ id: loc.id }) });
+      const okb = (await ok.json()) as { entry?: ModelEntry };
+      check(ok.status === 200 && okb.entry?.thinkingMode === "off", "local の thinkingMode off → 保存");
+
+      const bad = await patchModelRoute(jsonReq("PATCH", { thinkingMode: "weird" }), { params: Promise.resolve({ id: loc.id }) });
+      check(bad.status === 400, "不正な thinkingMode → 400");
+
+      // hosted は thinkingMode を無視 (auto のまま)
+      const hosted = await createModel({ label: "tm-hosted", provider: "anthropic", modelId: "claude-haiku-4-5", apiKeyRef: "anthropic" });
+      createdIds.push(hosted.id);
+      const hr = await patchModelRoute(jsonReq("PATCH", { thinkingMode: "off" }), { params: Promise.resolve({ id: hosted.id }) });
+      const hb = (await hr.json()) as { entry?: ModelEntry };
+      check(hr.status === 200 && hb.entry?.thinkingMode === "auto", "hosted の thinkingMode は無視 (auto のまま)");
     }
 
     console.log(`\n${passed} passed, ${failures.length} failed`);

@@ -6339,6 +6339,9 @@ a.news-title:hover {
 .ai-role-override-label { font-size: 12px; font-weight: 600; color: rgba(45, 34, 56, 0.85); }
 .ai-role-override-tier { font-size: 10px; font-weight: 500; color: rgba(45, 34, 56, 0.5); }
 .ai-role-override .ai-input { max-width: 55%; }
+.ai-thinking-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+.ai-thinking-label { font-size: 11px; font-weight: 600; color: rgba(45, 34, 56, 0.6); }
+.ai-thinking-select { width: auto; min-width: 150px; padding: 3px 8px; font-size: 12px; }
 
 /* === MailComposeModal (Phase D) === */
 .mail-compose-modal {
