@@ -20,7 +20,6 @@ import { db } from "@/db/client";
 import { rawMessages, workoutLogs } from "@/db/schema";
 import { and, eq, desc, gte } from "drizzle-orm";
 import { callLlm } from "@/lib/llm";
-import { getAnthropicConfig } from "@/lib/ai-settings";
 import type Anthropic from "@anthropic-ai/sdk";
 
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -294,31 +293,16 @@ async function extractWorkoutFromSession(sessionId: string): Promise<void> {
 }
 
 /**
- * primary (= local Gemma if enabled, else haikuModel) で叩いて失敗したら
- * AI 設定の sub model (= haikuModel) で 1 度だけフォールバック。
+ * food_extract role で抽出。local 失敗時の hosted fallback は #206 M3 の tier fallback
+ * (model_tier_fallback.sub) が担うので、ここでは手書き fallback を持たない。
  */
 async function callExtractWithFallback(userMsg: string): Promise<Anthropic.Message> {
-  try {
-    return await callLlm("food_extract", {
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userMsg }],
-      maxTokens: 700,
-      retry: true,
-    });
-  } catch (primaryErr) {
-    console.warn(
-      "[workout-extract] primary failed, fallback to sub model:",
-      primaryErr instanceof Error ? primaryErr.message : primaryErr
-    );
-    const cfg = await getAnthropicConfig();
-    return await callLlm("food_extract", {
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userMsg }],
-      maxTokens: 700,
-      model: cfg.haikuModel,
-      retry: true,
-    });
-  }
+  return await callLlm("food_extract", {
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: userMsg }],
+    maxTokens: 700,
+    retry: true,
+  });
 }
 
 // ───── helpers ─────

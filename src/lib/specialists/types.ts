@@ -31,8 +31,9 @@ export type Specialist = {
   yuiToolName: string;
   /** Yui への wrapper 説明: いつこの specialist に委譲すべきか */
   yuiDescription: string;
-  /** specialist 内部で使う Claude model */
-  model: string;
+  /** specialist 内部で使う model 上書き (env override 時のみ。未指定なら heavy tier に解決)。
+   *  registry entry id か raw model string。#206 M3 で tier 解決に委譲。 */
+  model?: string;
   /** specialist の system prompt */
   systemPrompt: string;
   /** specialist が内部で使う tools (Yui には見せない) */

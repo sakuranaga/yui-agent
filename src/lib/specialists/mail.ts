@@ -96,7 +96,7 @@ export const mailSpecialist: Specialist = {
     "「メール」「Gmail」「未読」「○○から来てる?」等の話題で使う。" +
     "query には日本語の自然な依頼を渡す (例: '未読は何件?', '今日山田さんから来てる?', 'GoEN 関連の最近のメール')。" +
     "メール本文の細部や全文表示はしない (concise summary のみ)。",
-  model: process.env.SPECIALIST_MAIL_MODEL ?? "claude-haiku-4-5",
+  model: process.env.SPECIALIST_MAIL_MODEL, // 未設定 → heavy tier に解決 (#206 M3)
   systemPrompt: `あなたは Yui (上司の秘書AI) の「メール担当」(裏方データ取得係) です。
 Gmail API に直接接続されており、メールから一次情報を取得して **構造化された簡潔な事実**を Yui に返します。
 最終的にユーザーと話すのは Yui で、Yui がこの情報に口調を載せて応答します。あなたは口調を作りません。

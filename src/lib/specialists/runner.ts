@@ -85,7 +85,8 @@ export async function runSpecialist(
 
   for (let iter = 0; iter < maxIter; iter++) {
     response = await callLlm("specialist", {
-      model: spec.model,
+      // spec.model 未指定なら heavy tier に解決 (#206 M3)。env override 時のみ渡す。
+      ...(spec.model ? { model: spec.model } : {}),
       maxTokens: maxTokens,
       system: [
         {
@@ -194,7 +195,8 @@ export async function runSpecialist(
     });
     try {
       const finalResp = await callLlm("specialist", {
-        model: spec.model,
+        // spec.model 未指定なら heavy tier に解決 (#206 M3)。env override 時のみ渡す。
+        ...(spec.model ? { model: spec.model } : {}),
         maxTokens: maxTokens,
         system: [
           {

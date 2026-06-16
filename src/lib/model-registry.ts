@@ -10,13 +10,14 @@
 import { randomUUID } from "node:crypto";
 import { db } from "@/db/client";
 import { modelRegistry, aiSettings, type ModelCapabilities } from "@/db/schema";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   getAiSetting,
   updateAiSettings,
   getAnthropicConfig,
   getLocalLlmConfig,
   invalidateCache,
+  type AiSettingKey,
 } from "@/lib/ai-settings";
 import { detectProvider } from "@/lib/llm-providers/detect";
 
@@ -143,6 +144,35 @@ export async function setTierFallback(f: TierFallback): Promise<void> {
   await updateAiSettings({ model_tier_fallback: JSON.stringify(f) });
 }
 
+// ───── role → tier|entryId 上書き (ai_settings KV) ─────
+
+/** role → (tier 名 "main|sub|heavy" or model entry id) の上書きマップ。 */
+export type RoleTierOverrides = Record<string, string>;
+
+function parseRoleOverrides(raw: string | null): RoleTierOverrides {
+  if (!raw || !raw.trim()) return {};
+  try {
+    const o = JSON.parse(raw) as unknown;
+    if (o && typeof o === "object" && !Array.isArray(o)) {
+      const out: RoleTierOverrides = {};
+      for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+        if (typeof v === "string" && v.trim()) out[k] = v;
+      }
+      return out;
+    }
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+
+export async function getRoleTierOverrides(): Promise<RoleTierOverrides> {
+  return parseRoleOverrides(await getAiSetting("role_tier_overrides"));
+}
+export async function setRoleTierOverrides(o: RoleTierOverrides): Promise<void> {
+  await updateAiSettings({ role_tier_overrides: JSON.stringify(o) });
+}
+
 // ───── 移行 seed ─────
 
 /** OpenAI 互換 endpoint の full URL から base (.../v1) を取り出す (二重 suffix 防止)。 */
@@ -227,5 +257,120 @@ export async function seedModelRegistryIfEmpty(): Promise<{ seeded: number }> {
   // tx 内で ai_settings を raw insert したので、commit 後に ai-settings キャッシュを無効化
   // (= updateAiSettings 非経由のため自動 invalidate が走らない。readers が stale を見ない様に)。
   if (result.seeded > 0) await invalidateCache();
+  return result;
+}
+
+// local-roles 移行を直列化する advisory lock のキー (#206 M3 専用)。
+const LOCAL_ROLES_LOCK_KEY = 206207;
+
+/** tx 内で ai_settings の生 value を読む (未存在は null)。 */
+async function readSettingTx(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  key: AiSettingKey
+): Promise<string | null> {
+  const [row] = await tx
+    .select({ value: aiSettings.value })
+    .from(aiSettings)
+    .where(eq(aiSettings.key, key))
+    .limit(1);
+  return row?.value ?? null;
+}
+
+/** tx 内で ai_settings を upsert。 */
+async function upsertSettingTx(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  key: AiSettingKey,
+  value: string
+): Promise<void> {
+  await tx
+    .insert(aiSettings)
+    .values({ key, value, isSecret: false, updatedAt: new Date() })
+    .onConflictDoUpdate({ target: aiSettings.key, set: { value, isSecret: false, updatedAt: new Date() } });
+}
+
+/**
+ * M3 移行 (一度だけ): 旧 `local_llm_roles`(+`notify`) の per-role local routing を
+ * `role_tier_overrides[role] = <local entry id>` に変換し、現挙動を保存する。
+ * (設計: docs/model-config-overhaul.md §8.5.1)
+ *
+ * - seed とは別経路。M1 seed 済みの既存環境でも確実に走る。
+ * - `model_local_roles_migrated` フラグで冪等 (一度だけ。後でユーザーが override を消しても再付与しない)。
+ * - local entry が無ければ作る (M1 seed 後に local を有効化した環境を救う)。
+ * - `model_tier_fallback.sub` 未設定なら hosted sub を設定 (local 失敗時の hosted fallback 保存)。
+ * - advisory lock + tx + flag 再確認で並行・部分失敗に安全。
+ */
+export async function migrateLocalRolesToTierOverrides(): Promise<{ migrated: boolean; roles: number }> {
+  const local = await getLocalLlmConfig();
+
+  const result = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${LOCAL_ROLES_LOCK_KEY})`);
+
+    // 並行プロセス対策: ロック取得後に flag を再確認 (先行が commit 済なら skip)。
+    const flag = await readSettingTx(tx, "model_local_roles_migrated");
+    if (flag === "1") return { migrated: false, roles: 0 };
+
+    // local 不使用環境 → 何も移行せずフラグだけ立てる。
+    if (!local.enabled || !local.url) {
+      await upsertSettingTx(tx, "model_local_roles_migrated", "1");
+      return { migrated: false, roles: 0 };
+    }
+
+    const normBase = normalizeOpenAiBase(local.url);
+
+    // local entry を同定 (正規化後 base で比較)。無ければ作る。
+    const found = await tx
+      .select()
+      .from(modelRegistry)
+      .where(
+        and(
+          eq(modelRegistry.provider, "local_openai"),
+          eq(modelRegistry.modelId, local.model),
+          eq(modelRegistry.baseUrl, normBase)
+        )
+      )
+      .limit(1);
+    let localId: string;
+    if (found.length > 0) {
+      localId = found[0].id;
+    } else {
+      localId = randomUUID();
+      await tx.insert(modelRegistry).values({
+        id: localId,
+        label: `${local.model} (local)`,
+        provider: "local_openai",
+        modelId: local.model,
+        baseUrl: normBase,
+        apiKeyRef: null,
+      });
+    }
+
+    // 旧 local_llm_roles + 常時 local の "notify" を per-role override に変換 (未設定の role のみ)。
+    const roles = new Set<string>([...local.roles, "notify"]);
+    const overrides = parseRoleOverrides(await readSettingTx(tx, "role_tier_overrides"));
+    let added = 0;
+    for (const role of roles) {
+      if (!overrides[role]) {
+        overrides[role] = localId;
+        added++;
+      }
+    }
+    await upsertSettingTx(tx, "role_tier_overrides", JSON.stringify(overrides));
+
+    // local 失敗時の hosted fallback 保存: fallback.sub 未設定時のみ hosted sub を設定。
+    const fallback = parseTierJson(await readSettingTx(tx, "model_tier_fallback"));
+    if (!fallback.sub) {
+      const assignment = parseTierJson(await readSettingTx(tx, "model_tier_assignment"));
+      if (assignment.sub) {
+        fallback.sub = assignment.sub;
+        await upsertSettingTx(tx, "model_tier_fallback", JSON.stringify(fallback));
+      }
+    }
+
+    await upsertSettingTx(tx, "model_local_roles_migrated", "1");
+    return { migrated: true, roles: added };
+  });
+
+  // tx 内で ai_settings を raw upsert したので commit 後にキャッシュ無効化。
+  await invalidateCache();
   return result;
 }

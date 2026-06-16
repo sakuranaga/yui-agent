@@ -32,7 +32,8 @@ export type AiSettingKey =
   // モデル設定刷新 (#206): 3 tier 割当 / fallback / role→tier override を JSON で保存
   | "model_tier_assignment"  // {"main":"<entryId>","sub":"...","heavy":"..."}
   | "model_tier_fallback"    // {"main":"<entryId|null>","sub":...,"heavy":...}
-  | "role_tier_overrides"    // {"<role>":"main|sub|heavy"} (既定マップの上書き、任意)
+  | "role_tier_overrides"    // {"<role>":"main|sub|heavy|<entryId>"} (既定マップ/エントリ直指定の上書き、任意)
+  | "model_local_roles_migrated"  // "1" = 旧 local_llm_roles → role_tier_overrides 移行済 (M3、一度だけ)
   // TTS
   | "tts_url"
   | "tts_normal_ref"
@@ -69,6 +70,7 @@ const SPECS: Record<AiSettingKey, Spec> = {
   model_tier_assignment: { env: "MODEL_TIER_ASSIGNMENT",    default: "" },
   model_tier_fallback:   { env: "MODEL_TIER_FALLBACK",      default: "" },
   role_tier_overrides:   { env: "ROLE_TIER_OVERRIDES",      default: "" },
+  model_local_roles_migrated: { env: null,                 default: "" },
   tts_url:               { env: "TTS_URL",                  default: null },
   tts_normal_ref:        { env: "TTS_NORMAL_REF",            default: null },
   tts_whisper_ref:       { env: "TTS_WHISPER_REF",           default: null },

@@ -17,29 +17,18 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { getAiSetting, getAnthropicConfig, shouldUseLocalLlmFor } from "@/lib/ai-settings";
-import { callLocalLlm } from "@/lib/local-llm";
+import { getAnthropicConfig } from "@/lib/ai-settings";
 import { detectProvider } from "@/lib/llm-providers/detect";
-import { callOpenAICompat } from "@/lib/llm-providers/openai";
-import { callGemini } from "@/lib/llm-providers/gemini";
-import type { ProviderId } from "@/lib/llm-models";
-
-// Anthropic client は call ごとに最新 apiKey で構築。設定 UI からの変更を
-// 30s キャッシュ越しに自動反映する。client インスタンス自体は軽い (config だけ)。
-async function getClient(): Promise<Anthropic> {
-  const cfg = await getAnthropicConfig();
-  return new Anthropic({ apiKey: cfg.apiKey ?? undefined });
-}
-
-/** provider 別に API キーを引く */
-async function getProviderApiKey(provider: ProviderId): Promise<string | null> {
-  switch (provider) {
-    case "anthropic": return getAiSetting("anthropic_api_key");
-    case "openai":    return getAiSetting("openai_api_key");
-    case "gemini":    return getAiSetting("gemini_api_key");
-    case "grok":      return getAiSetting("grok_api_key");
-  }
-}
+import {
+  getModel,
+  getTierAssignment,
+  getTierFallback,
+  getRoleTierOverrides,
+  type ModelEntry,
+  type ModelProvider,
+  type TierName,
+} from "@/lib/model-registry";
+import { callModelDirect } from "@/lib/model-call";
 
 export type LlmRole =
   | "main"          // Yui Sonnet ターン
@@ -60,15 +49,91 @@ export type LlmRole =
   | "notify"        // MCP notify: 開発エージェントの進捗連絡 → 結衣口調に整形 (ローカル優先 + Haiku fallback)
   | "specialist";  // specialist 個別呼び出し (model は spec.model で上書き)
 
-/** role 全部を main / haiku の 2 モデルにマップする。AI 設定 UI で 2 つだけ
- * 公開する設計上、role 別 env override は廃止。override 引数 (spec.model) は
- * specialist 用に残す。 */
-const SONNET_ROLES = new Set<LlmRole>(["main", "news_speak", "diary", "sleep_intro", "profile_synth"]);
+/** role → 3 tier (main/sub/heavy) の既定マップ (#206 §4)。
+ *  role_tier_overrides で上書き可。挙動保存: 旧 SONNET_ROLES が main、残りが sub、specialist が heavy。 */
+const DEFAULT_ROLE_TIER: Record<LlmRole, TierName> = {
+  main: "main",
+  news_speak: "main",
+  diary: "main",
+  sleep_intro: "main",
+  profile_synth: "main",
+  voice: "sub",
+  judge: "sub",
+  report: "sub",
+  extract: "sub",
+  reconcile: "sub",
+  news_curate: "sub",
+  morning_speak: "sub",
+  mail_curate: "sub",
+  tts_normalize: "sub",
+  food_extract: "sub",
+  notify: "sub",
+  specialist: "heavy",
+};
 
-async function resolveModel(role: LlmRole, override?: string): Promise<string> {
-  if (override) return override;
+export function resolveTier(role: LlmRole): TierName {
+  return DEFAULT_ROLE_TIER[role] ?? "sub";
+}
+
+/** registry に entry が無い時の防御用 ephemeral entry (model string 直指定 / 未 seed)。 */
+function ephemeralEntry(modelId: string): ModelEntry {
+  const provider = detectProvider(modelId) as ModelProvider;
+  return {
+    id: `ephemeral:${modelId}`,
+    label: modelId,
+    provider,
+    modelId,
+    baseUrl: null,
+    apiKeyRef: provider === "local_openai" ? null : provider,
+    capabilities: {},
+  };
+}
+
+async function entryForTier(tier: TierName): Promise<ModelEntry | null> {
+  const assignment = await getTierAssignment();
+  const id = assignment[tier];
+  if (!id) return null;
+  return getModel(id);
+}
+
+export type ResolvedEntry = { entry: ModelEntry; tier: TierName };
+
+/**
+ * role + override → 実際に呼ぶ entry と tier を解決 (#206 §8.5.2)。
+ * 優先順位: override(entry id or raw model string) > role_tier_overrides > tier 割当 > 防御 ephemeral。
+ */
+export async function resolveEntry(role: LlmRole, override?: string): Promise<ResolvedEntry> {
+  const tier = resolveTier(role);
+
+  // 1. override (spec.model / opts.model) 最優先。entry id ならそれ、無ければ raw model string → ephemeral。
+  if (override) {
+    const byId = await getModel(override);
+    return { entry: byId ?? ephemeralEntry(override), tier };
+  }
+
+  // 2. role_tier_overrides[role]: tier 名 or 実在 entry id のみ採用。不正値は warn して既定 tier へ。
+  const overrides = await getRoleTierOverrides();
+  const ov = overrides[role];
+  if (ov) {
+    if (ov === "main" || ov === "sub" || ov === "heavy") {
+      const e = await entryForTier(ov);
+      if (e) return { entry: e, tier: ov };
+    } else {
+      const byId = await getModel(ov);
+      if (byId) return { entry: byId, tier };
+      console.warn(
+        `[llm:${role}] role_tier_overrides 値 "${ov}" は tier 名でも実在 entry でもない → 既定 tier (${tier}) に fallback`
+      );
+    }
+  }
+
+  // 3. 既定 tier 割当。
+  const e = await entryForTier(tier);
+  if (e) return { entry: e, tier };
+
+  // 4. 防御: 割当未設定 / entry 消失 → 旧 anthropic 設定から ephemeral 合成。
   const cfg = await getAnthropicConfig();
-  return SONNET_ROLES.has(role) ? cfg.mainModel : cfg.haikuModel;
+  return { entry: ephemeralEntry(tier === "main" ? cfg.mainModel : cfg.haikuModel), tier };
 }
 
 /** モデル別単価 (USD per 1M tokens, 2026-04 時点)。
@@ -224,130 +289,39 @@ export type CallLlmOpts = {
 };
 
 /**
- * Anthropic messages.create の薄いラッパー。
- * - モデル解決 (role + override)
- * - リトライ (overloaded/5xx を最大 3 回)
- * - 1 行 log + トレース集計
+ * 1 つの entry で messages.create を実行 (retry + log + トレース集計込み)。
+ * provider 別 dispatch は M2 の callModelDirect に委譲。失敗時は throw (= 呼側で tier fallback)。
  */
-export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthropic.Message> {
-  // ローカル LLM (Gemma 等) を使うべき role かチェック。
-  // tool 利用 / system が配列 (TextBlockParam[]) の高度な構造は Anthropic 専用なので
-  // そのケースは強制的に Anthropic 経路に倒す (ローカルは text-only 想定)。
-  const hasComplexSystem = Array.isArray(opts.system);
-  const hasTools = !!opts.tools && opts.tools.length > 0;
-  const isMessageContentSimple = opts.messages.every(
-    (m) => typeof m.content === "string"
-  );
-  if (
-    !hasComplexSystem &&
-    !hasTools &&
-    isMessageContentSimple &&
-    (await shouldUseLocalLlmFor(role))
-  ) {
-    // ローカル設定済 + role が対象 = ここに入る。未設定の人はそもそも入らないので
-    // 「未設定の人が毎回エラー → fallback」にはならない。
-    // callLocalLlm 内部で MAX_RETRIES まで自前 retry してから throw するので、
-    // 一過性のネット blip では fallback しない (= 鯖が本当に死んでる時のみ)。
-    try {
-      const localRes = await callLocalLlm({
-        system: typeof opts.system === "string" ? opts.system : undefined,
-        messages: opts.messages as Array<{ role: "user" | "assistant"; content: string }>,
-        maxTokens: opts.maxTokens,
-        roleLabel: role,
-      });
-      // trace usage 集計 (cost 0 / cache 0)
-      const trace = traceStore.getStore();
-      if (trace) {
-        trace.usage.callCount++;
-        trace.usage.inputTokens += localRes.usage.input_tokens;
-        trace.usage.outputTokens += localRes.usage.output_tokens;
-      }
-      recordEvent({
-        type: "call",
-        ts: Date.now(),
-        role,
-        model: localRes.model ?? "local",
-        inputTokens: localRes.usage.input_tokens,
-        outputTokens: localRes.usage.output_tokens,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        costUsd: 0,
-        durationMs: 0,
-        retries: 0,
-        traceId: trace?.traceId,
-      });
-      return localRes;
-    } catch (e) {
-      // ローカル鯖死亡 → hosted (= 該当 role の sub model、SONNET_ROLES でなければ Haiku) に fall-through。
-      // 警告は 1 回出す (= slient コスト上昇を見落とさないため)。設定 → 通知 や監視で拾うのは将来課題。
-      console.warn(
-        `[llm:${role}] local LLM failed, falling back to hosted:`,
-        e instanceof Error ? e.message : e
-      );
-      // 下の hosted path に fall-through
-    }
-  }
-
-  const model = await resolveModel(role, opts.model);
-  const provider = detectProvider(model);
+async function attemptWithEntry(
+  role: LlmRole,
+  entry: ModelEntry,
+  opts: CallLlmOpts
+): Promise<Anthropic.Message> {
   const maxTokens = opts.maxTokens ?? 1024;
   const retryEnabled = opts.retry !== false;
+  // local (= 自前ホスト) はコスト 0 で記録。PRICE 未知で Sonnet 単価に化けるのを防ぐ。
+  const isLocal = entry.provider === "local_openai";
 
   let attempt = 0;
   let lastErr: unknown;
 
   while (attempt < (retryEnabled ? MAX_RETRIES : 1)) {
-    // t0 は try ブロックの先頭で取り直す (= 成功時の durationMs に
-    // 直前の失敗試行 + backoff sleep が混入しないように)。retry loop の外で 1 回だけ
-    // 取ると、retry 後に成功した時 dur が backoff 待機込みになりトレース指標が腫れる。
+    // t0 は try ブロックの先頭で取り直す (= 成功時 durationMs に失敗試行 + backoff を混入させない)。
     const t0 = Date.now();
     try {
-      let res: Anthropic.Message;
-      if (provider === "anthropic") {
-        const client = await getClient();
-        res = await client.messages.create({
-          model,
-          max_tokens: maxTokens,
-          ...(opts.system !== undefined ? { system: opts.system } : {}),
-          messages: opts.messages,
-          ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
-        });
-      } else {
-        const apiKey = await getProviderApiKey(provider);
-        if (!apiKey) {
-          throw new Error(`${provider} API key 未設定 (model=${model})`);
-        }
-        if (provider === "openai" || provider === "grok") {
-          res = await callOpenAICompat({
-            apiKey,
-            baseUrl: provider === "grok" ? "https://api.x.ai/v1" : "https://api.openai.com/v1",
-            model,
-            maxTokens,
-            // OpenAI 新モデル (GPT-5 / o-series) は max_completion_tokens 必須。
-            // Grok は OpenAI 互換 API だが max_tokens を受け付ける。
-            tokenParamName: provider === "openai" ? "max_completion_tokens" : "max_tokens",
-            system: opts.system,
-            messages: opts.messages,
-            tools: opts.tools,
-          });
-        } else {
-          // gemini
-          res = await callGemini({
-            apiKey,
-            model,
-            maxTokens,
-            system: opts.system,
-            messages: opts.messages,
-            tools: opts.tools,
-          });
-        }
-      }
+      const res = await callModelDirect(entry, {
+        system: opts.system,
+        messages: opts.messages,
+        tools: opts.tools,
+        maxTokens,
+      });
+
       const dur = Date.now() - t0;
       const inT = res.usage.input_tokens ?? 0;
       const outT = res.usage.output_tokens ?? 0;
       const cacheR = res.usage.cache_read_input_tokens ?? 0;
       const cacheW = res.usage.cache_creation_input_tokens ?? 0;
-      const cost = estimateCostUsd(model, inT, outT, cacheR, cacheW);
+      const cost = isLocal ? 0 : estimateCostUsd(entry.modelId, inT, outT, cacheR, cacheW);
 
       const trace = traceStore.getStore();
       if (trace) {
@@ -363,13 +337,13 @@ export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthrop
       const tracePart = trace ? ` trace=${trace.traceId}` : "";
       const attemptPart = attempt > 0 ? ` retries=${attempt}` : "";
       console.log(
-        `[llm:${role}] model=${model} in=${inT} out=${outT} cache_r=${cacheR} cache_w=${cacheW} $${cost.toFixed(5)} ${dur}ms${attemptPart}${tracePart}`
+        `[llm:${role}] model=${entry.modelId} provider=${entry.provider} in=${inT} out=${outT} cache_r=${cacheR} cache_w=${cacheW} $${cost.toFixed(5)} ${dur}ms${attemptPart}${tracePart}`
       );
       recordEvent({
         type: "call",
         ts: Date.now(),
         role,
-        model,
+        model: entry.modelId,
         inputTokens: inT,
         outputTokens: outT,
         cacheReadTokens: cacheR,
@@ -392,11 +366,49 @@ export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthrop
         attempt++;
         continue;
       }
-      // non-retryable / 最終失敗
-      console.error(`[llm:${role}] failed after ${attempt + 1} attempt(s):`, e);
       throw e;
     }
   }
   throw lastErr ?? new Error("callLlm: exhausted retries");
+}
+
+/**
+ * LLM 呼び出しの統一エントリ (#206 M3)。
+ * - **registry entry 解決** (role → tier → entry、override / role_tier_overrides 対応)
+ * - provider 別 dispatch は callModelDirect (M2) に委譲
+ * - **tier fallback**: primary が retry 尽きで失敗 → `model_tier_fallback[tier]` で 1 回再試行
+ * - retry (overloaded/5xx 最大 3 回) + 1 行 log + トレース集計
+ */
+export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthropic.Message> {
+  const { entry, tier } = await resolveEntry(role, opts.model);
+
+  try {
+    return await attemptWithEntry(role, entry, opts);
+  } catch (primaryErr) {
+    // tier fallback: 別 entry が設定されていれば 1 回だけ切替再試行 (primary と同一なら skip)。
+    const fallback = await getTierFallback();
+    const fbId = fallback[tier];
+    if (fbId && fbId !== entry.id) {
+      const fbEntry = await getModel(fbId);
+      if (fbEntry) {
+        console.warn(
+          `[llm:${role}] primary (${entry.modelId}) failed after retries, trying ${tier} fallback (${fbEntry.modelId}):`,
+          primaryErr instanceof Error ? primaryErr.message : primaryErr
+        );
+        try {
+          return await attemptWithEntry(role, fbEntry, opts);
+        } catch (fbErr) {
+          // fallback も失敗 → 設計 §8.5.4 通り primary の error を投げる (原因追跡用に fallback error は warn)。
+          console.warn(
+            `[llm:${role}] fallback (${fbEntry.modelId}) also failed:`,
+            fbErr instanceof Error ? fbErr.message : fbErr
+          );
+          throw primaryErr;
+        }
+      }
+    }
+    console.error(`[llm:${role}] failed (no fallback available):`, primaryErr);
+    throw primaryErr;
+  }
 }
 

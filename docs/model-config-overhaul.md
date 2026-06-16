@@ -202,6 +202,76 @@ migration + 起動時 1 回の seed:
 
 ---
 
+## 8.5 M3 実装設計 (詳細)
+
+M3 は `callLlm` の resolve 経路を「registry entry ベース」に刷新する。実装の曖昧点を以下に確定する。
+
+### 8.5.1 旧 per-role local routing の保全 (重要 — 挙動保存)
+
+現状 (実測) ご主人様の環境は `local_llm_roles = extract,reconcile,judge,tts_normalize,mail_curate,food_extract` + `notify` (常時) の **7 role だけ**を local Gemma に流し、残りは Haiku に残す **fine-grained 構成**。旧 `shouldUseLocalLlmFor(role)` を単純撤廃して「local は tier 未割当」のままにすると、この 7 role が黙って hosted Haiku に移る (**= 無言のコスト増 + local 遊休**)。
+
+3 tier モデルは tier 単位 (= sub 全体 or なし) で粗いため、この「sub の一部だけ local」を tier 割当だけでは表現できない。→ **`role_tier_overrides` を「role → tier 名 **または** model entry id」の両対応**にし、旧 `local_llm_roles`(+`notify`) を `role_tier_overrides[role] = <local entry id>` に変換する。これで**現挙動を完全保存**しつつ、M4 UI で per-role 上書きとして可視化・編集できる。
+
+> 設計判断: §6 は「local は自動割当せず手動」としていたが、それは tier 割当 (sub/main/heavy 全体) の話。per-role の**既存挙動保存**は migration の大原則 (§4「挙動保存を基本」) に従い自動変換する方が正しい。tier 一括割当 (sub=local 等) は引き続き手動。
+
+**専用 M3 migration が必須 (Codex 指摘 高-1)**: M1 の `seedModelRegistryIfEmpty()` は registry 非空で即 return するため、**既に seed 済みの実環境では走らない**。よって local-roles 変換を seed-empty に相乗りさせると「導入済み環境ほど変換されず 7 role が hosted に移る」最悪ケースになる。→ **seed とは別の idempotent な `migrateLocalRolesToTierOverrides()`** を起動時 (`tickMaintenance`) に置く。新規 ai_settings key `model_local_roles_migrated` を `AiSettingKey`/`SPECS` に追加 (env なし・既定 ""、非 secret)。アルゴリズム:
+> 1. `model_local_roles_migrated` フラグが立っていたら skip (= 一度だけ。ユーザーが後で override を消しても再付与しない)。
+> 2. `local.enabled && local.url` が**偽**なら、local 不使用環境 → フラグを立てて終了。
+> 3. local entry を registry から探す: `provider='local_openai'` かつ `model_id===local_llm_model` かつ `base_url===normalizeOpenAiBase(local_llm_url)` (生値比較だと full-endpoint vs base で空振りするため**正規化後で比較**。Codex 指摘 中-1)。**見つからなければ作る** (= M1 seed 後に local を有効化した環境を救う。Codex 指摘 高-1。フラグだけ立てて skip すると挙動保存が永久に失敗する)。
+> 4. `local_llm_roles` + `"notify"` の各 role について、`role_tier_overrides[role]` が**未設定**なら `= <local entry id>` を埋める。
+> 5. **local 失敗時の hosted fallback 保存 (Codex 指摘 高-2)**: `model_tier_fallback.sub` が**未設定時のみ** `= assignment.sub` (hosted haiku) を設定。以後はユーザー設定として尊重 (sub tier を local に差し替えても fallback.sub は触らない。Codex 指摘 低-1)。これで local-pinned role (resolveTier=sub) が落ちた時、tier fallback で hosted Haiku に落ちる旧挙動を保存。
+> 6. フラグを立てる。
+
+### 8.5.2 resolve 優先順位
+
+`resolveEntry(role, override)` → `{ entry, tier }`:
+
+1. `tier = resolveTier(role)` (§4 既定表)。
+2. **override (`opts.model` / `spec.model`) があれば最優先**:
+   - registry に同 id の entry があれば**それ**。
+   - 無ければ raw model string とみなし **ephemeral entry** (`provider = detectProvider(str)`, `baseUrl=null`, `apiKeyRef=provider`) を合成 (= 後方互換。workout/food-extract の `model: cfg.haikuModel` 等)。
+3. override 無し & `role_tier_overrides[role]` があれば (**厳密判定。Codex 指摘 中-1**):
+   - 値が `main|sub|heavy` の tier 名 → `assignment[該当 tier]`。
+   - 値が registry に**実在する** entry id → **その entry** (per-role 上書き。8.5.1 の local 等)。
+   - **どちらでもない** (削除済 id / 手編集ミス / 旧 JSON) → **warn して既定 tier assignment に落とす**。role override では raw model string の ephemeral 合成は**しない** (UUID 風文字列を raw model と誤認して hosted に投げる事故防止)。raw string ephemeral は `opts.model`/`spec.model` 経路のみ。
+4. それも無ければ `assignment[tier]` の entry。
+5. 最終 fallback: assignment 未設定/entry 消失時は `getAnthropicConfig()` から ephemeral 合成 (registry 未 seed でも壊れない防御)。
+
+### 8.5.3 spec.model と heavy tier
+
+現 specialist は `model: spec.model` (既定 `"claude-haiku-4-5"`) を**常に**渡すため、このままでは heavy tier 割当が常に override で潰れる。→ **spec の `model` を `string | undefined` にし、env override (`SPECIALIST_*_MODEL`) 未設定時は `undefined`** にする (`Specialist.model` 型 + mail/music/schedule の 3 定義 + runner の 2 送信箇所をまとめて変更)。runner は `{ ...(spec.model ? { model: spec.model } : {}) }` で定義済みの時だけ override 渡し。未定義 → `specialist` role が **heavy tier** に解決。
+- 挙動保存: 移行で heavy=sub=haiku、spec 既定も haiku → **同一モデル**。✓
+- env override を設定済みの人は entry-id-or-string として従来通り効く。
+
+### 8.5.4b extract 系の二重 fallback 解消 (Codex 指摘 中-2)
+
+`food-extract.ts` / `workout-extract.ts` の `callExtractWithFallback()` は「primary (local Gemma) 失敗 → `model: cfg.haikuModel` で 1 回再試行」という**手書き local→haiku fallback**。これは M3 の tier fallback (`fallback.sub = haiku`) が担う責務そのものなので、**手書き fallback を撤去**し `callLlm("food_extract", {...})` を直接呼ぶだけにする (M3 tier fallback に委譲)。挙動同値 (primary=local override / fallback=haiku tier fallback) かつ二重試行のコスト/ログ重複を解消。
+
+### 8.5.4 retry / fallback / logging
+
+- retry loop (`MAX_RETRIES`/`isRetryable`/backoff) は**現状維持**。dispatch 部のみ M2 の `callModelDirect(entry, …)` に置換。
+- **tier fallback (新規)**: primary entry が retry 尽きで throw → `model_tier_fallback[resolveTier(role)]` の entry があれば**それで再度 retry loop を 1 回**。fallback も失敗なら元 error を throw。
+  - **`primary.id === fallback.id` なら fallback を skip** (縮退防止)。
+  - 旧「local 失敗 → hosted sub」は、8.5.1 migration が `fallback.sub = hosted haiku` を設定するため、local-pinned role (resolveTier=sub) の失敗時にこの一般 fallback で保存される。
+- **cost logging**: `entry.provider === "local_openai"` は `cost=0` で記録 (旧 local 前置きの「無料」表示を保存。`PRICE` 不在で Sonnet 単価に化けるのを防ぐ)。log の `model=` は `entry.modelId` + provider を出す (local/hosted 区別。Codex 指摘 低-1)。
+- trace 集計・`recordEvent`・1 行 log は現状維持。
+
+### 8.5.5 撤廃 / 非対象
+
+- **撤廃 (llm.ts 内のみ)**: local text-only 前置き block / `shouldUseLocalLlmFor` 呼び出し / `detectProvider` による prefix 推定経路。
+- **残す**: `shouldUseLocalLlmFor` / `callLocalLlm` の**定義自体** (`intent-transform.ts` / `project-suggest.ts` が直接利用。これらの local 経路統合は M5 cleanup の範囲)。`local-llm.ts` ファイルも残す。
+
+### 8.5.6 テスト (M3)
+
+- `resolveTier` 既定表 (全 role → 期待 tier)。
+- `resolveEntry` 優先順位 (override id / override string→ephemeral / role_override id / role_override tier / tier assignment / 未 seed ephemeral)。
+- tier fallback 発火 (primary stub throw → fallback entry stub 呼ばれる)。
+- local entry の cost=0 記録。
+- 移行: `local_llm_roles` → `role_tier_overrides[role]=localId` 変換。
+- LLM 実呼びは stub (`callModelDirect` をモック or fetch stub)。
+
+---
+
 ## 9. テスト
 
 - レジストリ CRUD + 移行 seed (既存値 → entry/割当の正しい変換)。

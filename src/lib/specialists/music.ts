@@ -346,7 +346,7 @@ export const musicSpecialist: Specialist = {
     "Yui main の direct tool (music_pause/next/prev/volume/now_playing) で処理されるので、" +
     "specialist を呼んではならない。" +
     "ジャンル指定が無い「音楽かけて」だけならジャンルを聞き返してから。",
-  model: process.env.SPECIALIST_MUSIC_MODEL ?? "claude-haiku-4-5",
+  model: process.env.SPECIALIST_MUSIC_MODEL, // 未設定 → heavy tier に解決 (#206 M3)
   systemPrompt: `あなたは Yui (上司の秘書AI) の「音楽担当」(Spotify 操作係) です。
 Spotify Web API を直接叩いて、検索・再生・スキップ・音量制御を行います。
 最終的にユーザーと話すのは Yui で、Yui がこの情報に口調を載せて応答します。あなたは口調を作りません。

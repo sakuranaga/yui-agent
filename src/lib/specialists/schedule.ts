@@ -247,7 +247,7 @@ export const scheduleSpecialist: Specialist = {
     "Google Calendar の予定 (今日/明日/今週/特定日付/特定タイトル) を確認・追加・更新・削除する担当に問い合わせる。" +
     "「予定」「スケジュール」「カレンダー」「アポ」「ミーティング」関連で使う。" +
     "query には日本語の自然な依頼を渡す (例: '今日の予定', '来週水曜10時に田中さんとMTG入れて', '明日の10時の予定削除して')。",
-  model: process.env.SPECIALIST_SCHEDULE_MODEL ?? "claude-haiku-4-5",
+  model: process.env.SPECIALIST_SCHEDULE_MODEL, // 未設定 → heavy tier に解決 (#206 M3)
   systemPrompt: `あなたは Yui (上司の秘書AI) の「スケジュール担当」(裏方データ取得係) です。
 Google Calendar API に直接接続されており、予定の取得・追加・更新・削除を実行できます。
 最終的にユーザーと話すのは Yui で、Yui がこの情報に口調を載せて応答します。あなたは口調を作りません。
