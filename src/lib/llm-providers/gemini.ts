@@ -32,6 +32,8 @@ export type GeminiOpts = {
   system?: string | Anthropic.TextBlockParam[];
   messages: Anthropic.MessageParam[];
   tools?: Anthropic.Tool[];
+  /** tool-use を誘導/強制 (能力テスト等)。"auto" or 特定 tool 名を強制。 */
+  toolChoice?: "auto" | { name: string };
 };
 
 type GeminiPart =
@@ -230,6 +232,17 @@ export async function callGemini(opts: GeminiOpts): Promise<Anthropic.Message> {
   }
   if (tools) {
     body.tools = tools;
+    if (opts.toolChoice) {
+      body.toolConfig =
+        opts.toolChoice === "auto"
+          ? { functionCallingConfig: { mode: "AUTO" } }
+          : {
+              functionCallingConfig: {
+                mode: "ANY",
+                allowedFunctionNames: [opts.toolChoice.name],
+              },
+            };
+    }
   }
 
   const url =

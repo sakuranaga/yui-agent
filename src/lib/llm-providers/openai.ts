@@ -34,6 +34,8 @@ export type OpenAICompatOpts = {
   system?: string | Anthropic.TextBlockParam[];
   messages: Anthropic.MessageParam[];
   tools?: Anthropic.Tool[];
+  /** tool-use を誘導/強制 (能力テスト等)。"auto" or 特定 tool 名を強制。 */
+  toolChoice?: "auto" | { name: string };
 };
 
 type OAIMessage =
@@ -309,6 +311,12 @@ export async function callOpenAICompat(opts: OpenAICompatOpts): Promise<Anthropi
   };
   const tools = translateTools(opts.tools);
   if (tools) body.tools = tools;
+  if (tools && opts.toolChoice) {
+    body.tool_choice =
+      opts.toolChoice === "auto"
+        ? "auto"
+        : { type: "function", function: { name: opts.toolChoice.name } };
+  }
   if (reasoning && !omitReasoningEffortForTools(opts.model, !!tools)) {
     body.reasoning_effort = minimalReasoningEffort(opts.model);
   }
