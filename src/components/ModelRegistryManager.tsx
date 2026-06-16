@@ -131,16 +131,21 @@ export default function ModelRegistryManager() {
   });
   const [editId, setEditId] = useState<string | null>(null);
   const [formErr, setFormErr] = useState<string | null>(null);
+  // provider 別の利用可能モデル一覧 (hosted のみ。modelId を select させる)
+  const [availModels, setAvailModels] = useState<Array<{ id: string; provider: string; label: string }>>([]);
+  const [manualModel, setManualModel] = useState(false); // 一覧に無いモデルを手入力する
 
   const load = async () => {
     // setLoading(true) は付けない (= 初期値 true + reload 時のちらつき防止 + effect 内同期 setState 回避)
     try {
-      const [er, tr] = await Promise.all([
+      const [er, tr, mr] = await Promise.all([
         fetch("/api/model-registry", { cache: "no-store" }),
         fetch("/api/model-registry/tiers", { cache: "no-store" }),
+        fetch("/api/ai-settings/models", { cache: "no-store" }),
       ]);
       if (er.ok) setEntries(((await er.json()) as { entries: ModelEntry[] }).entries);
       if (tr.ok) setTiers((await tr.json()) as Tiers);
+      if (mr.ok) setAvailModels(((await mr.json()) as { models: Array<{ id: string; provider: string; label: string }> }).models);
     } catch (e) {
       console.warn("[model-registry] load failed:", e);
     } finally {
@@ -152,6 +157,16 @@ export default function ModelRegistryManager() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch
     void load();
   }, []);
+
+  // API キーを同画面で保存した直後などに、hosted モデル一覧を再取得する。
+  const refreshModels = async () => {
+    try {
+      const mr = await fetch("/api/ai-settings/models?refresh=1", { cache: "no-store" });
+      if (mr.ok) setAvailModels(((await mr.json()) as { models: Array<{ id: string; provider: string; label: string }> }).models);
+    } catch (e) {
+      console.warn("[model-registry] refreshModels failed:", e);
+    }
+  };
 
   const testEntry = async (id: string) => {
     setTestingId(id);
@@ -220,6 +235,7 @@ export default function ModelRegistryManager() {
     setEditId(e.id);
     setAdding(true);
     setFormErr(null);
+    setManualModel(true); // 編集は現在の modelId をそのまま見せる (テキスト入力)
     setForm({ label: e.label, provider: e.provider, modelId: e.modelId, baseUrl: e.baseUrl ?? "" });
   };
 
@@ -328,7 +344,7 @@ export default function ModelRegistryManager() {
             <div className="ai-field">
               <label className="ai-label">provider</label>
               <select className="ai-input" value={form.provider} disabled={editId !== null}
-                onChange={(ev) => setForm((f) => ({ ...f, provider: ev.target.value as Provider }))}>
+                onChange={(ev) => { setManualModel(false); setForm((f) => ({ ...f, provider: ev.target.value as Provider, modelId: "" })); }}>
                 {(Object.keys(PROVIDER_LABEL) as Provider[]).map((p) => (
                   <option key={p} value={p}>{PROVIDER_LABEL[p]}</option>
                 ))}
@@ -337,7 +353,39 @@ export default function ModelRegistryManager() {
             </div>
             <div className="ai-field">
               <label className="ai-label">モデル ID</label>
-              <input className="ai-input" value={form.modelId} onChange={(ev) => setForm((f) => ({ ...f, modelId: ev.target.value }))} placeholder="例: claude-sonnet-4-6 / gemma-... " />
+              {(() => {
+                const list = availModels.filter((m) => m.provider === form.provider);
+                const useSelect = form.provider !== "local_openai" && list.length > 0 && !manualModel;
+                if (useSelect) {
+                  return (
+                    <select
+                      className="ai-input"
+                      value={form.modelId}
+                      onChange={(ev) => {
+                        if (ev.target.value === "__manual__") { setManualModel(true); setForm((f) => ({ ...f, modelId: "" })); }
+                        else setForm((f) => ({ ...f, modelId: ev.target.value }));
+                      }}
+                    >
+                      <option value="">(モデルを選択)</option>
+                      {list.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      <option value="__manual__">— その他 (手入力) —</option>
+                    </select>
+                  );
+                }
+                return (
+                  <input className="ai-input" value={form.modelId}
+                    onChange={(ev) => setForm((f) => ({ ...f, modelId: ev.target.value }))}
+                    placeholder="例: claude-sonnet-4-6 / gemma-... " />
+                );
+              })()}
+              {form.provider !== "local_openai" && (
+                <div className="ai-test-row">
+                  <button type="button" className="ai-test-btn" onClick={() => void refreshModels()}>モデル一覧を再取得</button>
+                  {availModels.filter((m) => m.provider === form.provider).length === 0 && (
+                    <span className="ai-hint">この provider の API キーが未登録か、取得に失敗 (手入力可)</span>
+                  )}
+                </div>
+              )}
             </div>
             {form.provider === "local_openai" && (
               <div className="ai-field">
@@ -352,7 +400,7 @@ export default function ModelRegistryManager() {
             </div>
           </div>
         ) : (
-          <button type="button" className="ai-edit-btn" onClick={() => { setAdding(true); setEditId(null); setForm({ label: "", provider: "anthropic", modelId: "", baseUrl: "" }); }}>
+          <button type="button" className="ai-edit-btn" onClick={() => { setAdding(true); setEditId(null); setManualModel(false); setForm({ label: "", provider: "anthropic", modelId: "", baseUrl: "" }); }}>
             + モデル追加
           </button>
         )}
