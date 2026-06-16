@@ -272,6 +272,64 @@ M3 は `callLlm` の resolve 経路を「registry entry ベース」に刷新す
 
 ---
 
+## 8.6 M4 実装設計 (設定 UI)
+
+バックエンド (M1-M3) は本番稼働中。M4 は GUI でレジストリ管理 + tier 割当 + ゲート + fallback + ローカル追加を可能にする。UI 検証は実機スクショ (agent-browser 不可)。
+
+### 8.6.1 API ルート (M4 で新設、全て cookie 認証 / PUBLIC_PATHS 外)
+
+- `GET  /api/model-registry` → `{ entries: ModelEntry[] }` (capabilities 込み)。
+- `POST /api/model-registry` → entry 作成。body: `{label, provider, modelId, baseUrl?}`。
+  - **base_url 検証 (重要)**: `provider==='local_openai'` は baseUrl 必須 + `normalizeOpenAiBase` 正規化。検証は **scheme (http/https) + パース可能性のみ**。`validatePublicUrl` は**使わない** — あれは CGNAT(100.x=Tailscale)/private/loopback を**ブロック**する SSRF 用なので、ご主人様の `http://100.81.60.55:8000` や `http://llm:8081` を弾いてしまう。ローカル endpoint は本質的に private で、単一ユーザー・信頼前提 + 能力テストは登録済 base_url にしか ping しない (任意 URL を叩かない) ので、private 範囲を許可する軽量検証にする (旧 `local_llm_url` と同じ受理範囲)。
+  - **軽量検証の具体 (Codex 低-1)**: `http:`/`https:` のみ、hostname 必須、`username`/`password` 禁止、`hash`/`search` は除去、`normalizeOpenAiBase` 後に保存。
+  - apiKeyRef は provider から自動 (local は null)。
+- `PATCH /api/model-registry/[id]` → 部分更新 (label/modelId/baseUrl)。provider 変更は不可 (entry 作り直し)。
+  - **capabilities 失効 (Codex 高-1、tool-bypass 防止)**: `modelId` か `baseUrl` を変更したら **capabilities を未テスト (`{}`) にリセット** (= 古い tool 判定を新実体に持ち越さない)。さらにその entry が **tool 必須スロット (main/heavy の assignment・その fallback・main/heavy role override の entry id) に参照されている**なら、変更を **409 で拒否** (= 先に tier を外すか、変更後に再テストして再割当させる)。label だけの変更は capabilities 据え置き・参照中でも可。
+- `DELETE /api/model-registry/[id]` → 削除。**ガード**: tier 割当 / fallback / `role_tier_overrides` の **entry id 直参照**のどれかにあれば 409 + 参照箇所を返す (UI で確認させる。tier 名経由の role override も「なぜ消せないか」表示に含める。Codex 中-3)。
+- `POST /api/model-registry/[id]/test` → 既存 (M2)。
+- `GET  /api/model-registry/tiers` → `{ assignment, fallback, roleOverrides }`。
+- `PUT  /api/model-registry/tiers` → `{ assignment?, fallback?, roleOverrides? }` を保存。
+  - **変更スロットのみ検証 (Codex 中-1 の精緻化)**: partial body を既存と merge した上で、**この PUT で実際に変更されたスロットだけ**にゲートを適用する。理由: M1 seed が作った main/heavy entry は capabilities 未テスト (`{}`) なので、merge 後の全状態を毎回検証すると「sub を変えるだけでも main/heavy のテストを強制」される過剰ブロックになる。tool 必須スロット同士に横断制約は無い (各 main/heavy が独立に tool 対応必須) ため、変更スロットのみの検証で判定漏れは出ない。seed 由来の未テスト entry は grandfather され、ユーザーがその枠を**変更した時**に初めてゲートがかかる。
+  - **role override の値は entry id のみ (実装で確定)**: API では `roleOverrides[role]` に **実在 entry id だけ**許可し、tier 名 (`main|sub|heavy`) は 400 で拒否する。理由: tool 必須 role が tier 名で tier を指すと、その tier の **assignment と fallback の双方**に tool 制約が波及し、`assignment[t]`/`fallback[t]` 変更時・対象 entry の `modelId` 変更時にすべて間接ゲートが要る (cross-dependency が増殖し抜けやすい)。UI も移行も entry id しか書かないので、tier 名生成経路を塞いで複雑性を排除する。`resolveEntry` は防御として tier 名も**読める**が、生成はしない。未知 role キーも 400。
+  - **サーバ側ゲート (UI バイパス対策、§2.3)**: 次が `supportsTools !== true` の entry を指したら **422** + 理由。
+    - `assignment.main` / `assignment.heavy`、および `fallback.main` / `fallback.heavy`。
+    - **role override**: 値 (= entry id) を、`resolveTier(role) ∈ {main, heavy}` なら tool 対応必須 (例: `specialist → <non-tool entry>` を弾く)。`sub` role の entry-id 直指定は tool 不問 (= ご主人様の local 7 role)。`resolveTier`/`isLlmRole` は llm.ts から import。
+    - **変更スロットのみ検証**: 上記は「この PUT で変更された assignment/fallback/roleOverride スロット」だけに適用 (seed 由来の未テスト entry を grandfather)。
+
+### 8.6.2 UI 構成 (`AiSettingsSection.tsx` 改修)
+
+既存セクション順: モデル選択 / API キー / ローカル LLM / TTS / embedding。これを再構成:
+
+1. **登録モデル (レジストリ)** — 旧「モデル選択」を置換:
+   - 各 entry: label・provider バッジ・modelId・**能力バッジ** (到達 ✓/✗ · tool ✓/✗、未テストは灰)・「テスト」「編集」「削除」。
+   - 「+ モデル追加」: hosted (provider + modelId) / local (provider=local_openai + baseUrl + modelId)。追加後に「テスト」促し。
+   - テストは `POST .../[id]/test` を叩き capabilities を更新 → バッジ即時反映。
+2. **tier 割当** — 新規:
+   - main / sub / heavy の 3 ドロップダウン。**main/heavy は `supportsTools===true` の entry のみ選択肢** (未テスト/非対応は disabled + 理由 tooltip「tool 未対応のため割当不可」)。sub は全 entry。
+   - 各 tier に **fallback ドロップダウン** (同ゲート適用、「なし」可)。
+   - 保存は `PUT .../tiers`。サーバ 422 (ゲート違反) は UI でエラー表示。
+3. **role 別上書き (詳細、折りたたみ)** — 移行で作られた per-role override を可視化・編集:
+   - 各 LlmRole 行: 「既定 (tier 名)」/ 各 entry をドロップダウン選択。既定に戻す = override 削除。
+   - 旧「ローカル LLM で処理する役割」チェックボックス UI の置換 (= local だけでなく任意 entry を role に紐付け可能に一般化)。
+4. **provider 別 API キー** — 既存維持。
+5. **TTS / embedding** — 既存維持。
+
+絵文字禁止・lucide 流 inline SVG (`feedback_no_emoji_icons`)。能力バッジは色 + アイコン。
+
+### 8.6.3 旧 UI/キーの扱い
+
+- 旧「モデル選択」(`anthropic_main_model`/`haiku_model` の単純 dropdown) と「ローカル LLM で処理する役割」チェックは**撤去** (tier 割当 + role 上書きに統合)。
+- 旧キー (`anthropic_*_model` / `local_llm_*`) は M5 まで読み取り専用で残す。M4 UI からは編集経路を消すだけ。
+- ローカル LLM の有効/URL/モデルは「+ モデル追加 (local)」+ レジストリ編集に移行。`local_llm_enabled` 等の生編集 UI は撤去 (entry の有無で表現)。
+
+### 8.6.4 テスト (M4)
+
+- API: registry CRUD (作成/更新/削除ガード)、tiers GET/PUT、ゲート 422 (tool 非対応を main/heavy に割当 → 弾く)、削除ガード 409。
+- tsx ベース、LLM 実呼びなし (能力テストはモック endpoint)。
+- UI は実機スクショでご主人様確認 (チェックリスト: バッジ表示 / ゲート disabled / 追加・削除 / 保存反映)。
+
+---
+
 ## 9. テスト
 
 - レジストリ CRUD + 移行 seed (既存値 → entry/割当の正しい変換)。

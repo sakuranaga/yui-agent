@@ -13,6 +13,7 @@
  * 設計: docs/ai-settings.md §6
  */
 import { useEffect, useState } from "react";
+import ModelRegistryManager from "./ModelRegistryManager";
 
 type Settings = {
   anthropic_api_key: string;
@@ -35,17 +36,6 @@ type Settings = {
 
 type ProviderId = "anthropic" | "openai" | "gemini" | "grok";
 
-type LlmModel = {
-  id: string;
-  provider: ProviderId;
-  label: string;
-};
-
-type ModelListResponse = {
-  models: LlmModel[];
-  providers: Record<ProviderId, { hasKey: boolean; modelCount: number }>;
-};
-
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
@@ -62,15 +52,6 @@ const API_KEY_FIELDS: Array<{
   { key: "openai_api_key",    provider: "openai",    placeholder: "sk-..." },
   { key: "gemini_api_key",    provider: "gemini",    placeholder: "AIza..." },
   { key: "grok_api_key",      provider: "grok",      placeholder: "xai-..." },
-];
-
-const LOCAL_ROLE_OPTIONS: Array<{ key: string; label: string; desc: string }> = [
-  { key: "extract",       label: "会話 → 記憶抽出",       desc: "プライバシー大: 会話本文を外部に送らない" },
-  { key: "reconcile",     label: "記憶の矛盾 / 重複解消", desc: "プライバシー大: 記憶内容を外部に送らない" },
-  { key: "judge",         label: "ディスパッチ判定",       desc: "二値判定、頻度高い軽量タスク" },
-  { key: "tts_normalize", label: "TTS 前処理 (読み正規化)", desc: "発話毎に走る、規則的なタスク" },
-  { key: "mail_curate",   label: "メール仕分け",           desc: "プライバシー大 + コスト 0: メール本文を外部に送らない、1日数百件処理" },
-  { key: "food_extract",  label: "食事ログ抽出",           desc: "プライバシー大: 食事/体重情報を外部に送らない。会話毎に走るので頻度高め" },
 ];
 
 type TestProvider = "anthropic" | "local" | "tts" | "embed";
@@ -93,12 +74,6 @@ export default function AiSettingsSection() {
   const [testing, setTesting] = useState<TestProvider | null>(null);
   const [testResults, setTestResults] = useState<Partial<Record<TestProvider, TestResult>>>({});
 
-  // モデル一覧 (起動時に取得 + API キー保存後に refresh)
-  const [models, setModels] = useState<LlmModel[]>([]);
-  const [providerStatus, setProviderStatus] =
-    useState<ModelListResponse["providers"] | null>(null);
-  const [modelsLoading, setModelsLoading] = useState(false);
-
   useEffect(() => {
     (async () => {
       try {
@@ -113,24 +88,7 @@ export default function AiSettingsSection() {
         setLoading(false);
       }
     })();
-    void loadModels(false);
   }, []);
-
-  const loadModels = async (refresh: boolean) => {
-    setModelsLoading(true);
-    try {
-      const url = refresh ? "/api/ai-settings/models?refresh=1" : "/api/ai-settings/models";
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) return;
-      const data = (await res.json()) as ModelListResponse;
-      setModels(data.models);
-      setProviderStatus(data.providers);
-    } catch (e) {
-      console.warn("[ai-settings] models load failed:", e);
-    } finally {
-      setModelsLoading(false);
-    }
-  };
 
   const update = (key: keyof Settings, value: string) => {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
@@ -157,8 +115,6 @@ export default function AiSettingsSection() {
         const data = (await refresh.json()) as { settings: Settings };
         setSettings(data.settings);
         setDraft(data.settings);
-        // API キーが変わった可能性があるので model 一覧も refresh
-        void loadModels(true);
         // TTS 設定が変わった可能性 → IconBar 等で使う TTS status キャッシュをクリア
         // + custom event で IconBar に再 ping を促す (= 即時 SLEEP ボタン更新)
         try {
@@ -222,48 +178,12 @@ export default function AiSettingsSection() {
   return (
     <div className="ai-settings">
       <p className="ai-settings-desc">
-        メイン / サブモデルは登録済み API キーの provider すべてから選択できます。
+        モデルを登録 → 接続テストで tool 対応を確認 → メイン / サブ / ヘビー に割り当てます。
         API キーはマスク表示され、「編集」を押したときだけ書き換えられます。
       </p>
 
-      {/* === 1. モデル選択 === */}
-      <section className="ai-card">
-        <h3 className="ai-card-title">モデル選択</h3>
-        <ModelSelect
-          label="メインモデル"
-          hint="Yui 本体の応答に使うモデル"
-          value={draft.anthropic_main_model}
-          onChange={(v) => update("anthropic_main_model", v)}
-          models={models}
-          loading={modelsLoading}
-        />
-        <ModelSelect
-          label="サブモデル"
-          hint="要約・分類など軽量タスク用"
-          value={draft.anthropic_haiku_model}
-          onChange={(v) => update("anthropic_haiku_model", v)}
-          models={models}
-          loading={modelsLoading}
-        />
-        <div className="ai-test-row">
-          <button
-            type="button"
-            className="ai-test-btn"
-            onClick={() => void loadModels(true)}
-            disabled={modelsLoading}
-          >
-            {modelsLoading ? "取得中…" : "モデル一覧を再取得"}
-          </button>
-          {providerStatus && (
-            <span className="ai-test-result">
-              {(["anthropic", "openai", "gemini", "grok"] as ProviderId[])
-                .filter((p) => providerStatus[p].hasKey)
-                .map((p) => `${PROVIDER_LABEL[p]} ${providerStatus[p].modelCount}`)
-                .join(" / ") || "API キー未登録"}
-            </span>
-          )}
-        </div>
-      </section>
+      {/* === 1. モデルレジストリ + 割当 (#206 M4) === */}
+      <ModelRegistryManager />
 
       {/* === 2. API キー === */}
       <section className="ai-card">
@@ -308,83 +228,6 @@ export default function AiSettingsSection() {
           ※ OpenAI / Gemini / Grok の実呼び出しは Phase 2 で実装予定。
           現状は model 一覧の取得のみ各 provider から行います。
         </div>
-      </section>
-
-      {/* === 3. ローカル LLM === */}
-      <section className="ai-card">
-        <h3 className="ai-card-title">ローカル LLM</h3>
-        <div className="ai-field ai-field-checkbox">
-          <label className="ai-checkbox-label">
-            <input
-              type="checkbox"
-              checked={draft.local_llm_enabled === "true"}
-              onChange={(e) => update("local_llm_enabled", e.target.checked ? "true" : "false")}
-            />
-            <span>有効</span>
-          </label>
-          <span className="ai-hint">
-            メール仕分け等のローカル処理に使用 (例: Gemma on AI Max+ 395)
-          </span>
-        </div>
-        <div className="ai-field">
-          <label className="ai-label">エンドポイント (OpenAI 互換)</label>
-          <input
-            name="ai-settings-local-llm-url"
-            type="text"
-            className="ai-input"
-            value={draft.local_llm_url}
-            onChange={(e) => update("local_llm_url", e.target.value)}
-            placeholder="http://llm:8081/v1/chat/completions"
-          />
-        </div>
-        <div className="ai-field">
-          <label className="ai-label">モデル名</label>
-          <input
-            name="ai-settings-local-llm-model"
-            type="text"
-            className="ai-input"
-            value={draft.local_llm_model}
-            onChange={(e) => update("local_llm_model", e.target.value)}
-            placeholder="gemma-4-26b-a4b"
-          />
-        </div>
-
-        <div className="ai-field">
-          <label className="ai-label">ローカル LLM で処理する役割</label>
-          <div className="ai-hint">
-            チェックを入れた処理は Anthropic ではなくローカル LLM が担当します。
-          </div>
-          <div className="ai-role-list">
-            {LOCAL_ROLE_OPTIONS.map((opt) => {
-              const enabled = roleListHas(draft.local_llm_roles, opt.key);
-              return (
-                <label key={opt.key} className="ai-role-item">
-                  <input
-                    type="checkbox"
-                    checked={enabled}
-                    onChange={(e) =>
-                      update(
-                        "local_llm_roles",
-                        toggleRole(draft.local_llm_roles, opt.key, e.target.checked)
-                      )
-                    }
-                  />
-                  <div className="ai-role-text">
-                    <div className="ai-role-label">{opt.label}</div>
-                    <div className="ai-role-desc">{opt.desc}</div>
-                  </div>
-                </label>
-              );
-            })}
-          </div>
-        </div>
-
-        <TestRow
-          provider="local"
-          result={testResults.local}
-          testing={testing === "local"}
-          onTest={() => void test("local")}
-        />
       </section>
 
       {/* === 4. TTS === */}
@@ -514,68 +357,6 @@ export default function AiSettingsSection() {
       </div>
     </div>
   );
-}
-
-function ModelSelect(props: {
-  label: string;
-  hint?: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: LlmModel[];
-  loading: boolean;
-}) {
-  const grouped: Record<ProviderId, LlmModel[]> = {
-    anthropic: [], openai: [], gemini: [], grok: [],
-  };
-  for (const m of props.models) grouped[m.provider].push(m);
-
-  // 現在保存値が一覧に無ければ "現在の保存値" として末尾に option を追加
-  const currentInList = props.models.some((m) => m.id === props.value);
-  const showCurrentFallback = props.value.length > 0 && !currentInList;
-
-  return (
-    <div className="ai-field">
-      <label className="ai-label">{props.label}</label>
-      <select
-        className="ai-input"
-        value={props.value}
-        onChange={(e) => props.onChange(e.target.value)}
-        disabled={props.loading}
-      >
-        <option value="">(未選択)</option>
-        {(["anthropic", "openai", "gemini", "grok"] as ProviderId[]).map((p) =>
-          grouped[p].length === 0 ? null : (
-            <optgroup key={p} label={PROVIDER_LABEL[p]}>
-              {grouped[p].map((m) => (
-                <option key={`${p}:${m.id}`} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </optgroup>
-          )
-        )}
-        {showCurrentFallback && (
-          <optgroup label="現在の保存値 (取得できず)">
-            <option value={props.value}>{props.value}</option>
-          </optgroup>
-        )}
-      </select>
-      {props.hint && <div className="ai-hint">{props.hint}</div>}
-    </div>
-  );
-}
-
-function roleListHas(csv: string, key: string): boolean {
-  return csv.split(",").map((s) => s.trim()).includes(key);
-}
-
-function toggleRole(csv: string, key: string, enable: boolean): string {
-  const set = new Set(
-    csv.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
-  );
-  if (enable) set.add(key);
-  else set.delete(key);
-  return Array.from(set).join(",");
 }
 
 function TestRow(props: {

@@ -181,6 +181,30 @@ export function normalizeOpenAiBase(url: string): string {
   return trimmed.replace(/\/chat\/completions$/i, "");
 }
 
+/**
+ * local_openai の base_url 軽量検証 (#206 §8.6.1)。
+ * SSRF 用 validatePublicUrl は使わない (private/CGNAT を弾きローカル endpoint を拒否するため)。
+ * http/https・hostname 必須・認証情報禁止・hash/search 除去 → normalizeOpenAiBase。
+ */
+export function sanitizeLocalBaseUrl(
+  raw: string
+): { ok: true; value: string } | { ok: false; error: string } {
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return { ok: false, error: "URL の形式が不正です" };
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    return { ok: false, error: "http:// または https:// のみ対応です" };
+  }
+  if (!u.hostname) return { ok: false, error: "ホスト名がありません" };
+  if (u.username || u.password) return { ok: false, error: "URL に認証情報は含められません" };
+  u.hash = "";
+  u.search = "";
+  return { ok: true, value: normalizeOpenAiBase(u.toString()) };
+}
+
 /** provider → api_key_ref (= 暗号化済キーの参照名)。local は null。 */
 function apiKeyRefFor(provider: ModelProvider): string | null {
   return provider === "local_openai" ? null : provider;

@@ -6269,6 +6269,77 @@ a.news-title:hover {
   animation: fadeOut 2.5s ease-in forwards;
 }
 
+/* === モデルレジストリ (#206 M4) === */
+.ai-model-list { display: flex; flex-direction: column; gap: 8px; }
+.ai-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 250, 245, 0.6);
+  border: 1px solid rgba(45, 34, 56, 0.1);
+}
+.ai-model-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ai-model-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-model-label { font-size: 13px; font-weight: 700; color: rgba(45, 34, 56, 0.9); }
+.ai-model-provider {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+.ai-model-id {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: rgba(45, 34, 56, 0.6);
+  word-break: break-all;
+}
+.ai-cap-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.ai-cap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 8px 1px 5px;
+  border-radius: 999px;
+}
+.ai-cap-badge.ok { color: rgb(60, 140, 85); background: rgba(80, 170, 110, 0.14); }
+.ai-cap-badge.err { color: rgb(190, 70, 70); background: rgba(200, 80, 80, 0.12); }
+.ai-cap-badge.unknown { color: rgba(45, 34, 56, 0.5); background: rgba(45, 34, 56, 0.07); }
+.ai-cap-err { font-size: 10px; color: rgb(190, 90, 70); }
+.ai-model-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.ai-edit-btn.ai-danger { color: rgb(190, 70, 70); border-color: rgba(200, 80, 80, 0.4); }
+.ai-edit-btn.ai-danger:hover { background: rgba(200, 80, 80, 0.1); }
+.ai-model-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(var(--accent-rgb), 0.05);
+  border: 1px dashed rgba(var(--accent-rgb), 0.3);
+}
+.ai-role-overrides {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 250, 245, 0.5);
+  border: 1px solid rgba(45, 34, 56, 0.08);
+}
+.ai-role-override { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ai-role-override-label { font-size: 12px; font-weight: 600; color: rgba(45, 34, 56, 0.85); }
+.ai-role-override-tier { font-size: 10px; font-weight: 500; color: rgba(45, 34, 56, 0.5); }
+.ai-role-override .ai-input { max-width: 55%; }
+
 /* === MailComposeModal (Phase D) === */
 .mail-compose-modal {
   max-width: 720px;

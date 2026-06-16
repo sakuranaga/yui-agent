@@ -75,6 +75,12 @@ export function resolveTier(role: LlmRole): TierName {
   return DEFAULT_ROLE_TIER[role] ?? "sub";
 }
 
+/** 既知の LlmRole 一覧 (role_tier_overrides の検証用)。 */
+export const LLM_ROLES = Object.keys(DEFAULT_ROLE_TIER) as LlmRole[];
+export function isLlmRole(s: string): s is LlmRole {
+  return Object.prototype.hasOwnProperty.call(DEFAULT_ROLE_TIER, s);
+}
+
 /** registry に entry が無い時の防御用 ephemeral entry (model string 直指定 / 未 seed)。 */
 function ephemeralEntry(modelId: string): ModelEntry {
   const provider = detectProvider(modelId) as ModelProvider;
