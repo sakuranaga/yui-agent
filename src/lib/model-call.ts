@@ -22,6 +22,8 @@ export type DirectCallOpts = {
   tools?: Anthropic.Tool[];
   toolChoice?: LlmToolChoice;
   maxTokens?: number;
+  /** sampling temperature (未指定なら各 provider の API 既定)。 */
+  temperature?: number;
 };
 
 // 現状 provider ごとに単一 API キーを ai_settings に持つ前提なので、entry.apiKeyRef
@@ -52,6 +54,7 @@ export async function callModelDirect(
     return client.messages.create({
       model: entry.modelId,
       max_tokens: maxTokens,
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts.system !== undefined ? { system: opts.system } : {}),
       messages: opts.messages,
       ...(hasTools ? { tools: opts.tools } : {}),
@@ -77,6 +80,7 @@ export async function callModelDirect(
       messages: opts.messages,
       tools: opts.tools,
       toolChoice: opts.toolChoice,
+      temperature: opts.temperature,
     });
   }
 
@@ -113,6 +117,9 @@ export async function callModelDirect(
     messages: opts.messages,
     tools: opts.tools,
     toolChoice: opts.toolChoice,
+    temperature: opts.temperature,
+    // ローカル self-host (Gemma/Qwen) のみ thinking 抑制を送る。
+    disableThinking: entry.provider === "local_openai",
   });
 }
 

@@ -108,7 +108,8 @@ async function testLocal(override: Record<string, string>): Promise<void> {
         messages: [{ role: "user", content: "ping" }],
         max_tokens: 16,
         // Gemma 3+ / Qwen 3+ の thinking モデルは default ON だと 16 token 枠を内部考察で
-        // 使い切って content 空 → 「応答に content が無い」で接続テスト失敗。詳細は local-llm.ts。
+        // 使い切って content 空 → 「応答に content が無い」で接続テスト失敗。
+        // (本番経路は callOpenAICompat の disableThinking で同等処理。#206 M5)
         chat_template_kwargs: { enable_thinking: false },
       }),
       timeoutMs: 15_000,

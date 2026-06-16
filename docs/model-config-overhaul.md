@@ -330,6 +330,46 @@ M3 は `callLlm` の resolve 経路を「registry entry ベース」に刷新す
 
 ---
 
+## 8.7 M5 実装設計 (旧経路の統合 + クリーンアップ)
+
+M1-M4 でレジストリ経路が稼働。残るは `callLlm` を経由しない 2 つの直叩き経路の統合と、死んだ旧 API の撤去。
+
+### 8.7.1 intent-transform / project-suggest の統合
+
+`intent-transform.ts:268` / `project-suggest.ts:132` は `callLocalLlm` を**直接・常時**呼ぶ (= local 必須、hosted fallback 無し、失敗時 null)。`temperature:0.2` を渡す。これを `callLlm` 経由に寄せる:
+
+- **temperature plumbing**: `CallLlmOpts.temperature?` / `DirectCallOpts.temperature?` を追加し、`callModelDirect` → 各アダプタに通す (Anthropic `temperature` / OpenAI 互換 body.temperature / Gemini `generationConfig.temperature`)。未指定なら従来通り API 既定。
+- **Gemma/Qwen thinking 抑制の移植 (Codex 高-1、かつ M3 の潜在リグレッション修正)**: 旧 `callLocalLlm` は `chat_template_kwargs:{enable_thinking:false}` を送り、空 content 時に `reasoning_content` を fallback で拾う (Gemma 3+/Qwen 3+ が thinking を出して JSON content が空になる事故を防ぐ)。**M3 で 7 つの local role を `callOpenAICompat` 経路に寄せた時点でこの処理が抜けていた** (= ご主人様の thinking 系 Gemma で extract/mail_curate 等の JSON 成功率が落ちていた可能性)。→ `callOpenAICompat` に対応:
+  - `OpenAICompatOpts.disableThinking?` を追加 → true なら `body.chat_template_kwargs = {enable_thinking:false}`。**`callModelDirect` は `provider==='local_openai'` の時だけ true** にする (OpenAI/Grok は未知フィールドで 400 になりうるので送らない)。
+  - response 解析で `message.content` が空なら `message.reasoning_content` を text fallback に (全 provider 共通、無害)。
+  - これで M3 リグレッション (7 role) + M5 (intent/project_suggest) の両方が直る。`testModelCapabilities` も callModelDirect 経由なので local probe にも効く。
+- **新 role**: `LlmRole` に `intent` / `project_suggest` を追加、`DEFAULT_ROLE_TIER` で **sub** 既定 (OSS の local 無し環境でも Haiku で動く)。UI の `ROLE_META` にも追加。
+- **呼び換え**: `callLocalLlm({...})` → `callLlm("intent", { system, messages, maxTokens, temperature: 0.2 })` / `callLlm("project_suggest", {...})`。アプリ層の JSON 再試行 (intent の tryOnce 2 回) は維持。
+- **挙動保存 (privacy)**: 現状 local 常時なので、**M5 移行で intent/project_suggest を local entry に role 上書き**する (local 有効環境のみ。新フラグ `model_intent_roles_migrated`)。これで primary=local を維持。M3 の `migrateLocalRolesToTierOverrides` と同じ idempotent helper パターンを再利用:
+  - local entry を find-or-create (M3 後に local 有効化した環境を救う。Codex 中-1)。
+  - `model_tier_fallback.sub` 未設定なら `assignment.sub` を設定 (M3 で済んでいる前提だが冪等に。Codex 中-2)。
+  - **挙動変化 (要明示)**: 旧経路は local 失敗時 fallback 無し (null)。統合後は tier fallback (`fallback.sub`=Haiku) が効くため、**local 失敗時のみ Haiku に落ちる**。送られるデータ種別: intent=変換元 artifact 本文 (notes/mail/todo 等)、project_suggest=project カタログ + artifact 要約。既存 7 role と同じ「local 障害時のみ外部」挙動だが、扱うデータが本文寄りなので明示してご主人様承認を取る (Codex 低-1)。
+
+### 8.7.2 死んだ旧 API の撤去
+
+- `shouldUseLocalLlmFor` (`ai-settings.ts:208`): M3 で唯一の呼び出し元 (llm.ts) を撤去済 → **定義削除**。
+- `callLocalLlm` + `src/lib/local-llm.ts`: 上記統合後に呼び出し元ゼロ → **ファイル削除**。
+- `getLocalLlmConfig` は seed / 移行が使うので**残す**。`local_llm_*` / `anthropic_*_model` キーも seed source + ephemeral fallback source なので**残す** (削除不可)。設定 UI からの編集経路は M4 で撤去済。
+
+### 8.7.3 ドキュメント
+
+- 本設計書 §10 の `local-llm.ts` 参照を削除、新経路 (model-registry / model-call / model-tier-gate) を追記。
+- CLAUDE.md にモデル設定の項があれば更新 (現状は無し)。
+
+### 8.7.4 テスト
+
+- temperature が各アダプタ body に乗るか (fetch stub)。
+- intent/project_suggest role の resolveTier=sub。
+- M5 移行: local 有効環境で intent/project_suggest が role 上書きに入る + 冪等。
+- 既存 102 テストの非回帰。
+
+---
+
 ## 9. テスト
 
 - レジストリ CRUD + 移行 seed (既存値 → entry/割当の正しい変換)。
@@ -341,11 +381,15 @@ M3 は `callLlm` の resolve 経路を「registry entry ベース」に刷新す
 
 ---
 
-## 10. 関連
+## 10. 関連 (実装後)
 
-- `src/lib/llm.ts` — callLlm / resolveModel / SONNET_ROLES / ローカル前置き
-- `src/lib/ai-settings.ts` — 設定キー / getAnthropicConfig / getLocalLlmConfig / SECRET_KEYS
-- `src/lib/llm-providers/` — detect / openai / gemini (+ grok は openai 互換)
-- `src/lib/local-llm.ts` — callLocalLlm (→ local_openai provider に畳む)
-- `src/components/AiSettingsSection.tsx` — 設定 UI
-- `src/lib/crypto.ts` — API キー暗号化 / `src/lib/url-validate.ts` — base_url 検証
+- `src/lib/llm.ts` — callLlm / resolveTier / resolveEntry / attemptWithEntry / tier fallback / DEFAULT_ROLE_TIER / isLlmRole
+- `src/lib/model-call.ts` — callModelDirect (per-entry dispatcher) + 能力テスト (M2)
+- `src/lib/model-registry.ts` — registry CRUD / tier 割当 / role 上書き / 移行 (M3 local roles・M5 intent roles)
+- `src/lib/model-tier-gate.ts` — checkToolSlots / roleRequiresTool / findEntryReferences
+- `src/lib/ai-settings.ts` — 設定キー / getAnthropicConfig / getLocalLlmConfig / SECRET_KEYS (旧キーは seed/ephemeral fallback source として温存)
+- `src/lib/llm-providers/` — detect / openai (temperature・disableThinking・reasoning_content) / gemini (temperature) (+ grok は openai 互換)
+- `src/app/api/model-registry/` — route (list/create) / [id] (PATCH/DELETE) / [id]/test / tiers (GET/PUT)
+- `src/components/{AiSettingsSection,ModelRegistryManager}.tsx` — 設定 UI
+- `src/lib/crypto.ts` — API キー暗号化 / `src/lib/url-validate.ts` — public URL 検証 (local は `sanitizeLocalBaseUrl` で別扱い)
+- **撤去済 (M5)**: `src/lib/local-llm.ts` (callLocalLlm) / `shouldUseLocalLlmFor` — intent/project_suggest を callLlm に統合し不要化。

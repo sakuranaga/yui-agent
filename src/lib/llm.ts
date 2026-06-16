@@ -47,6 +47,8 @@ export type LlmRole =
   | "mail_curate"   // メール仕分け (本文込み bucket + score、Haiku でも十分)
   | "food_extract"  // 会話から食事ログ抽出 (eaten_at 推定込み)、栄養 lookup の引き当ても兼ねる
   | "notify"        // MCP notify: 開発エージェントの進捗連絡 → 結衣口調に整形 (ローカル優先 + Haiku fallback)
+  | "intent"        // cross-tool 変換 (artifact → 別ツールの下書き JSON、ローカル優先)
+  | "project_suggest" // artifact → 関連プロジェクト提案 (ローカル優先)
   | "specialist";  // specialist 個別呼び出し (model は spec.model で上書き)
 
 /** role → 3 tier (main/sub/heavy) の既定マップ (#206 §4)。
@@ -68,6 +70,8 @@ const DEFAULT_ROLE_TIER: Record<LlmRole, TierName> = {
   tts_normalize: "sub",
   food_extract: "sub",
   notify: "sub",
+  intent: "sub",
+  project_suggest: "sub",
   specialist: "heavy",
 };
 
@@ -290,6 +294,8 @@ export type CallLlmOpts = {
   messages: Anthropic.MessageParam[];
   tools?: Anthropic.Tool[];
   maxTokens?: number;
+  /** sampling temperature (未指定なら provider 既定)。 */
+  temperature?: number;
   /** リトライ無効化したい場合 (例: 副作用テスト) */
   retry?: boolean;
 };
@@ -320,6 +326,7 @@ async function attemptWithEntry(
         messages: opts.messages,
         tools: opts.tools,
         maxTokens,
+        temperature: opts.temperature,
       });
 
       const dur = Date.now() - t0;

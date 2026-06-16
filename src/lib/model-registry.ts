@@ -287,11 +287,10 @@ export async function seedModelRegistryIfEmpty(): Promise<{ seeded: number }> {
 // local-roles 移行を直列化する advisory lock のキー (#206 M3 専用)。
 const LOCAL_ROLES_LOCK_KEY = 206207;
 
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 /** tx 内で ai_settings の生 value を読む (未存在は null)。 */
-async function readSettingTx(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-  key: AiSettingKey
-): Promise<string | null> {
+async function readSettingTx(tx: Tx, key: AiSettingKey): Promise<string | null> {
   const [row] = await tx
     .select({ value: aiSettings.value })
     .from(aiSettings)
@@ -301,15 +300,50 @@ async function readSettingTx(
 }
 
 /** tx 内で ai_settings を upsert。 */
-async function upsertSettingTx(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-  key: AiSettingKey,
-  value: string
-): Promise<void> {
+async function upsertSettingTx(tx: Tx, key: AiSettingKey, value: string): Promise<void> {
   await tx
     .insert(aiSettings)
     .values({ key, value, isSecret: false, updatedAt: new Date() })
     .onConflictDoUpdate({ target: aiSettings.key, set: { value, isSecret: false, updatedAt: new Date() } });
+}
+
+/** local entry を (provider + modelId + 正規化 base で) 同定し、無ければ作って id を返す。 */
+async function findOrCreateLocalEntryTx(tx: Tx, local: { model: string; url: string }): Promise<string> {
+  const normBase = normalizeOpenAiBase(local.url);
+  const found = await tx
+    .select()
+    .from(modelRegistry)
+    .where(
+      and(
+        eq(modelRegistry.provider, "local_openai"),
+        eq(modelRegistry.modelId, local.model),
+        eq(modelRegistry.baseUrl, normBase)
+      )
+    )
+    .limit(1);
+  if (found.length > 0) return found[0].id;
+  const id = randomUUID();
+  await tx.insert(modelRegistry).values({
+    id,
+    label: `${local.model} (local)`,
+    provider: "local_openai",
+    modelId: local.model,
+    baseUrl: normBase,
+    apiKeyRef: null,
+  });
+  return id;
+}
+
+/** local 失敗時の hosted fallback 保存: model_tier_fallback.sub 未設定なら assignment.sub を入れる。 */
+async function ensureSubFallbackTx(tx: Tx): Promise<void> {
+  const fallback = parseTierJson(await readSettingTx(tx, "model_tier_fallback"));
+  if (!fallback.sub) {
+    const assignment = parseTierJson(await readSettingTx(tx, "model_tier_assignment"));
+    if (assignment.sub) {
+      fallback.sub = assignment.sub;
+      await upsertSettingTx(tx, "model_tier_fallback", JSON.stringify(fallback));
+    }
+  }
 }
 
 /**
@@ -339,34 +373,7 @@ export async function migrateLocalRolesToTierOverrides(): Promise<{ migrated: bo
       return { migrated: false, roles: 0 };
     }
 
-    const normBase = normalizeOpenAiBase(local.url);
-
-    // local entry を同定 (正規化後 base で比較)。無ければ作る。
-    const found = await tx
-      .select()
-      .from(modelRegistry)
-      .where(
-        and(
-          eq(modelRegistry.provider, "local_openai"),
-          eq(modelRegistry.modelId, local.model),
-          eq(modelRegistry.baseUrl, normBase)
-        )
-      )
-      .limit(1);
-    let localId: string;
-    if (found.length > 0) {
-      localId = found[0].id;
-    } else {
-      localId = randomUUID();
-      await tx.insert(modelRegistry).values({
-        id: localId,
-        label: `${local.model} (local)`,
-        provider: "local_openai",
-        modelId: local.model,
-        baseUrl: normBase,
-        apiKeyRef: null,
-      });
-    }
+    const localId = await findOrCreateLocalEntryTx(tx, local);
 
     // 旧 local_llm_roles + 常時 local の "notify" を per-role override に変換 (未設定の role のみ)。
     const roles = new Set<string>([...local.roles, "notify"]);
@@ -379,22 +386,55 @@ export async function migrateLocalRolesToTierOverrides(): Promise<{ migrated: bo
       }
     }
     await upsertSettingTx(tx, "role_tier_overrides", JSON.stringify(overrides));
-
-    // local 失敗時の hosted fallback 保存: fallback.sub 未設定時のみ hosted sub を設定。
-    const fallback = parseTierJson(await readSettingTx(tx, "model_tier_fallback"));
-    if (!fallback.sub) {
-      const assignment = parseTierJson(await readSettingTx(tx, "model_tier_assignment"));
-      if (assignment.sub) {
-        fallback.sub = assignment.sub;
-        await upsertSettingTx(tx, "model_tier_fallback", JSON.stringify(fallback));
-      }
-    }
+    await ensureSubFallbackTx(tx);
 
     await upsertSettingTx(tx, "model_local_roles_migrated", "1");
     return { migrated: true, roles: added };
   });
 
   // tx 内で ai_settings を raw upsert したので commit 後にキャッシュ無効化。
+  await invalidateCache();
+  return result;
+}
+
+// M5 移行を直列化する advisory lock のキー (#206 M5 専用)。
+const INTENT_ROLES_LOCK_KEY = 206208;
+
+/**
+ * M5 移行 (一度だけ): 旧 callLocalLlm 直叩きだった `intent` / `project_suggest` を、
+ * local entry への role 上書きに変換し「local 常時」挙動を保存する (設計 §8.7.1)。
+ * local 有効環境のみ。local entry は find-or-create、fallback.sub も冪等に確保。
+ */
+export async function migrateIntentRolesToLocal(): Promise<{ migrated: boolean; roles: number }> {
+  const local = await getLocalLlmConfig();
+
+  const result = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${INTENT_ROLES_LOCK_KEY})`);
+
+    const flag = await readSettingTx(tx, "model_intent_roles_migrated");
+    if (flag === "1") return { migrated: false, roles: 0 };
+
+    if (!local.enabled || !local.url) {
+      await upsertSettingTx(tx, "model_intent_roles_migrated", "1");
+      return { migrated: false, roles: 0 };
+    }
+
+    const localId = await findOrCreateLocalEntryTx(tx, local);
+    const overrides = parseRoleOverrides(await readSettingTx(tx, "role_tier_overrides"));
+    let added = 0;
+    for (const role of ["intent", "project_suggest"]) {
+      if (!overrides[role]) {
+        overrides[role] = localId;
+        added++;
+      }
+    }
+    await upsertSettingTx(tx, "role_tier_overrides", JSON.stringify(overrides));
+    await ensureSubFallbackTx(tx);
+
+    await upsertSettingTx(tx, "model_intent_roles_migrated", "1");
+    return { migrated: true, roles: added };
+  });
+
   await invalidateCache();
   return result;
 }

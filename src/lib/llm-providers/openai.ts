@@ -36,6 +36,12 @@ export type OpenAICompatOpts = {
   tools?: Anthropic.Tool[];
   /** tool-use を誘導/強制 (能力テスト等)。"auto" or 特定 tool 名を強制。 */
   toolChoice?: "auto" | { name: string };
+  /** sampling temperature (未指定なら API 既定)。 */
+  temperature?: number;
+  /** Gemma 3+/Qwen 3+ 等の thinking を抑制 (= ローカル self-host 用)。
+   *  true で body.chat_template_kwargs={enable_thinking:false} を送る。
+   *  OpenAI/Grok は未知フィールドで 400 になりうるので local_openai のみ true にすること。 */
+  disableThinking?: boolean;
 };
 
 type OAIMessage =
@@ -70,6 +76,8 @@ type OAIResponse = {
     message: {
       role: "assistant";
       content: string | null;
+      // thinking 系モデルが content を空にして内部考察をここに流すケースの fallback 用。
+      reasoning_content?: string | null;
       tool_calls?: OAIToolCall[];
     };
     finish_reason: "stop" | "tool_calls" | "length" | "content_filter" | null;
@@ -209,10 +217,13 @@ function translateResponse(res: OAIResponse, model: string): Anthropic.Message {
     throw new Error("OpenAI: empty choices");
   }
   const content: Anthropic.ContentBlock[] = [];
-  if (choice.message.content && choice.message.content.length > 0) {
+  // content が空でも reasoning_content に出力があれば拾う (Gemma/Qwen の thinking 抑制が
+  // server 側で無視された時の防御。strict な OpenAI 互換 server で当該フィールドが無くても無害)。
+  const textOut = choice.message.content || choice.message.reasoning_content || "";
+  if (textOut.length > 0) {
     content.push({
       type: "text",
-      text: choice.message.content,
+      text: textOut,
       citations: [],
     });
   }
@@ -309,6 +320,11 @@ export async function callOpenAICompat(opts: OpenAICompatOpts): Promise<Anthropi
     [tokenParam]: effectiveTokens,
     messages,
   };
+  if (opts.temperature !== undefined) body.temperature = opts.temperature;
+  // ローカル thinking モデル (Gemma 3+/Qwen 3+) の内部考察を抑制。llama.cpp/vLLM は
+  // chat template に渡し、非対応 server は未知フィールドとして無視する。OpenAI/Grok には
+  // 送らない (= disableThinking は local_openai 時のみ true)。
+  if (opts.disableThinking) body.chat_template_kwargs = { enable_thinking: false };
   const tools = translateTools(opts.tools);
   if (tools) body.tools = tools;
   if (tools && opts.toolChoice) {

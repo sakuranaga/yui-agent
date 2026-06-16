@@ -34,6 +34,8 @@ export type GeminiOpts = {
   tools?: Anthropic.Tool[];
   /** tool-use を誘導/強制 (能力テスト等)。"auto" or 特定 tool 名を強制。 */
   toolChoice?: "auto" | { name: string };
+  /** sampling temperature (未指定なら API 既定)。 */
+  temperature?: number;
 };
 
 type GeminiPart =
@@ -225,7 +227,10 @@ export async function callGemini(opts: GeminiOpts): Promise<Anthropic.Message> {
 
   const body: Record<string, unknown> = {
     contents,
-    generationConfig: { maxOutputTokens: opts.maxTokens },
+    generationConfig: {
+      maxOutputTokens: opts.maxTokens,
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    },
   };
   if (sys) {
     body.systemInstruction = { parts: [{ text: sys }] };

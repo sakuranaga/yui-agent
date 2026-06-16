@@ -81,9 +81,8 @@ export function tickMaintenance(): void {
         }
         // モデルレジストリ (#206): 空なら既存 model 設定から移行 seed (idempotent)。
         try {
-          const { seedModelRegistryIfEmpty, migrateLocalRolesToTierOverrides } = await import(
-            "@/lib/model-registry"
-          );
+          const { seedModelRegistryIfEmpty, migrateLocalRolesToTierOverrides, migrateIntentRolesToLocal } =
+            await import("@/lib/model-registry");
           const r = await seedModelRegistryIfEmpty();
           if (r.seeded > 0) {
             console.log(`[startup] model_registry seeded ${r.seeded} entries (migration)`);
@@ -92,6 +91,11 @@ export function tickMaintenance(): void {
           const m = await migrateLocalRolesToTierOverrides();
           if (m.migrated) {
             console.log(`[startup] local roles → role_tier_overrides migrated (${m.roles} roles)`);
+          }
+          // M5: 旧 callLocalLlm 直叩きの intent/project_suggest を local role 上書きに保全 (一度だけ)。
+          const mi = await migrateIntentRolesToLocal();
+          if (mi.migrated) {
+            console.log(`[startup] intent/project_suggest → local override migrated (${mi.roles} roles)`);
           }
         } catch (e) {
           console.warn("[startup] model registry migration failed:", e);

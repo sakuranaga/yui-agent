@@ -15,7 +15,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { db } from "@/db/client";
 import { projects } from "@/db/schema";
 import { eq, asc } from "drizzle-orm";
-import { callLocalLlm } from "@/lib/local-llm";
+import { callLlm } from "@/lib/llm";
 import {
   formatArtifactForLlm,
   type ArtifactPayload,
@@ -129,12 +129,11 @@ export async function suggestProjects(
 
   let response: Anthropic.Message;
   try {
-    response = await callLocalLlm({
+    response = await callLlm("project_suggest", {
       system: SYSTEM,
       messages: [{ role: "user", content: userMsg }],
       maxTokens: 400,
       temperature: 0.2,
-      roleLabel: "project_suggest",
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

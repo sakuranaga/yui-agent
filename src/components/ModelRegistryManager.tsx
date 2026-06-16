@@ -70,6 +70,8 @@ const ROLE_META: Array<{ role: string; label: string; tier: TierName }> = [
   { role: "tts_normalize", label: "TTS 前処理", tier: "sub" },
   { role: "food_extract", label: "食事ログ抽出", tier: "sub" },
   { role: "notify", label: "進捗連絡整形", tier: "sub" },
+  { role: "intent", label: "ツール間変換", tier: "sub" },
+  { role: "project_suggest", label: "プロジェクト提案", tier: "sub" },
   { role: "specialist", label: "専門エージェント", tier: "heavy" },
 ];
 

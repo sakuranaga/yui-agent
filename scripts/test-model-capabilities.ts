@@ -284,6 +284,48 @@ async function main() {
     }
   }
 
+  // --- 7. temperature / disableThinking / reasoning_content (#206 M5) ---
+  console.log("[7] temperature / disableThinking / reasoning_content");
+  {
+    const origFetch = globalThis.fetch;
+    let captured: Record<string, unknown> = {};
+    const stub = (responseBody: unknown) => {
+      globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+        captured = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return { ok: true, status: 200, json: async () => responseBody, text: async () => "" } as Response;
+      }) as typeof fetch;
+    };
+    const oai = (msg: Record<string, unknown>) => ({ id: "x", model: "m", choices: [{ index: 0, message: { role: "assistant", ...msg }, finish_reason: "stop" }], usage: {} });
+    try {
+      // openai: temperature が body に乗る
+      stub(oai({ content: "ok" }));
+      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }], temperature: 0.2 });
+      check(captured.temperature === 0.2, "openai: temperature が body に乗る");
+
+      // openai: disableThinking → chat_template_kwargs
+      stub(oai({ content: "ok" }));
+      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }], disableThinking: true });
+      check(JSON.stringify(captured.chat_template_kwargs) === JSON.stringify({ enable_thinking: false }), "openai: disableThinking → chat_template_kwargs");
+
+      // openai: disableThinking 無しなら送らない
+      stub(oai({ content: "ok" }));
+      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }] });
+      check(captured.chat_template_kwargs === undefined, "openai: disableThinking 無しなら chat_template_kwargs 無し");
+
+      // openai: content 空 + reasoning_content → text に拾う
+      stub(oai({ content: null, reasoning_content: "thought" }));
+      const r = await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "m", maxTokens: 16, tokenParamName: "max_tokens", messages: [{ role: "user", content: "hi" }] });
+      check(r.content.some((b) => b.type === "text" && b.text === "thought"), "openai: content 空 → reasoning_content を text に拾う");
+
+      // gemini: temperature が generationConfig に乗る
+      stub({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }], usageMetadata: {} });
+      await callGemini({ apiKey: "k", model: "m", maxTokens: 16, messages: [{ role: "user", content: "hi" }], temperature: 0.2 });
+      check((captured.generationConfig as { temperature?: number })?.temperature === 0.2, "gemini: temperature が generationConfig に乗る");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  }
+
   // --- summary ---
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) {

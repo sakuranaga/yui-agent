@@ -19,6 +19,7 @@ import {
   setTierFallback,
   setRoleTierOverrides,
   migrateLocalRolesToTierOverrides,
+  migrateIntentRolesToLocal,
   getRoleTierOverrides,
   getTierFallback,
 } from "@/lib/model-registry";
@@ -68,6 +69,7 @@ async function main() {
     fallback: await getAiSetting("model_tier_fallback"),
     overrides: await getAiSetting("role_tier_overrides"),
     migrated: await getAiSetting("model_local_roles_migrated"),
+    intentMigrated: await getAiSetting("model_intent_roles_migrated"),
   };
   const createdIds: string[] = [];
 
@@ -79,6 +81,7 @@ async function main() {
       ["voice", "sub"], ["judge", "sub"], ["report", "sub"], ["extract", "sub"], ["reconcile", "sub"],
       ["news_curate", "sub"], ["morning_speak", "sub"], ["mail_curate", "sub"], ["tts_normalize", "sub"],
       ["food_extract", "sub"], ["notify", "sub"],
+      ["intent", "sub"], ["project_suggest", "sub"],
       ["specialist", "heavy"],
     ];
     for (const [role, tier] of expect) check(resolveTier(role) === tier, `${role} → ${tier}`);
@@ -195,6 +198,32 @@ async function main() {
       }
     }
 
+    // ── 7. M5 移行 (intent/project_suggest を local に) ──
+    console.log("[7] M5 移行 (migrateIntentRolesToLocal)");
+    {
+      const local = await getLocalLlmConfig();
+      await updateAiSettings({ model_intent_roles_migrated: "" });
+      if (!local.enabled || !local.url) {
+        const r = await migrateIntentRolesToLocal();
+        check(r.migrated === false, "local 未使用 → migrated=false");
+        check((await getAiSetting("model_intent_roles_migrated")) === "1", "フラグは立つ");
+      } else {
+        await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id });
+        await setRoleTierOverrides({});
+        const idsBefore = new Set((await listModels()).map((m) => m.id));
+        const r = await migrateIntentRolesToLocal();
+        for (const m of await listModels()) {
+          if (!idsBefore.has(m.id) && !createdIds.includes(m.id)) createdIds.push(m.id);
+        }
+        check(r.migrated === true && r.roles === 2, "local 使用 → intent/project_suggest の 2 件を移行");
+        const ov = await getRoleTierOverrides();
+        check(typeof ov["intent"] === "string" && typeof ov["project_suggest"] === "string", "intent/project_suggest が role 上書きに入った");
+        check(ov["intent"] === ov["project_suggest"], "両方が同一 local entry id を指す");
+        const r2 = await migrateIntentRolesToLocal();
+        check(r2.migrated === false, "2 回目は冪等 (migrated=false)");
+      }
+    }
+
     // ── summary ──
     console.log(`\n${passed} passed, ${failures.length} failed`);
     if (failures.length > 0) {
@@ -207,6 +236,7 @@ async function main() {
       model_tier_fallback: snap.fallback ?? "",
       role_tier_overrides: snap.overrides ?? "",
       model_local_roles_migrated: snap.migrated ?? "",
+      model_intent_roles_migrated: snap.intentMigrated ?? "",
     });
     for (const id of createdIds) await deleteModel(id).catch(() => {});
     console.log("[restore] ai_settings + temp entries を元に戻しました");

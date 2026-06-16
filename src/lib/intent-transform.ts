@@ -12,7 +12,7 @@
  * 設計: docs/roadmap.md §6.9 (intent endpoint)
  */
 import type Anthropic from "@anthropic-ai/sdk";
-import { callLocalLlm } from "@/lib/local-llm";
+import { callLlm } from "@/lib/llm";
 import {
   formatArtifactForLlm,
   type ArtifactPayload,
@@ -265,12 +265,11 @@ export async function transformIntent(
 
   const system = buildSystemPrompt();
   const tryOnce = async (): Promise<{ text: string; parsed: AnyDraft | null }> => {
-    const response = await callLocalLlm({
+    const response = await callLlm("intent", {
       system,
       messages: [{ role: "user", content: userMsg }],
       maxTokens: 500,
       temperature: 0.2,
-      roleLabel: `intent_${source.type}_to_${target}`,
     });
     const text = extractTextBlocks(response);
     const raw = tryParseJson(text);
