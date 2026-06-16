@@ -79,6 +79,16 @@ export function tickMaintenance(): void {
         } catch (e) {
           console.warn("[startup] seedTtsDictionaryIfEmpty failed:", e);
         }
+        // モデルレジストリ (#206): 空なら既存 model 設定から移行 seed (idempotent)。
+        try {
+          const { seedModelRegistryIfEmpty } = await import("@/lib/model-registry");
+          const r = await seedModelRegistryIfEmpty();
+          if (r.seeded > 0) {
+            console.log(`[startup] model_registry seeded ${r.seeded} entries (migration)`);
+          }
+        } catch (e) {
+          console.warn("[startup] seedModelRegistryIfEmpty failed:", e);
+        }
         // food_logs.nutrition_status='pending'/'processing' で取り残された行を pickup
         // (= 前回起動中に extractor が INSERT したが worker が完走する前に restart した場合、
         //   または worker が processing にした直後に落ちた場合)

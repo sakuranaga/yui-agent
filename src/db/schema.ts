@@ -741,6 +741,34 @@ export type AiSetting = typeof aiSettings.$inferSelect;
 export type NewAiSetting = typeof aiSettings.$inferInsert;
 
 /**
+ * モデルレジストリ (docs/model-config-overhaul.md #206)。
+ * hosted / ローカルの LLM を複数登録。provider 明示。3 tier 割当は ai_settings KV。
+ */
+export type ModelCapabilities = {
+  reachable?: boolean;
+  supportsTools?: boolean;
+  testedAt?: string; // ISO
+  lastError?: string | null;
+};
+export const modelRegistry = pgTable(
+  "model_registry",
+  {
+    id: text("id").primaryKey(),
+    label: text("label").notNull(),
+    provider: text("provider").notNull(), // anthropic|openai|gemini|grok|local_openai
+    modelId: text("model_id").notNull(),
+    baseUrl: text("base_url"),
+    apiKeyRef: text("api_key_ref"),
+    capabilities: jsonb("capabilities").$type<ModelCapabilities>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("model_registry_provider_idx").on(t.provider)]
+);
+export type ModelRegistryRow = typeof modelRegistry.$inferSelect;
+export type NewModelRegistryRow = typeof modelRegistry.$inferInsert;
+
+/**
  * メール統合システム (Phase A)。設計: docs/mail-system.md §4
  *
  * - gmail_accounts: メール機能で使う Gmail アカウントの registry

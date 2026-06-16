@@ -29,6 +29,10 @@ export type AiSettingKey =
   // 例: "extract,reconcile,judge,tts_normalize"
   // 空文字なら 1 つも使わない (全 role が Anthropic 経由)。
   | "local_llm_roles"
+  // モデル設定刷新 (#206): 3 tier 割当 / fallback / role→tier override を JSON で保存
+  | "model_tier_assignment"  // {"main":"<entryId>","sub":"...","heavy":"..."}
+  | "model_tier_fallback"    // {"main":"<entryId|null>","sub":...,"heavy":...}
+  | "role_tier_overrides"    // {"<role>":"main|sub|heavy"} (既定マップの上書き、任意)
   // TTS
   | "tts_url"
   | "tts_normal_ref"
@@ -62,6 +66,9 @@ const SPECS: Record<AiSettingKey, Spec> = {
   local_llm_url:         { env: "LOCAL_LLM_URL",            default: "http://llm:8081/v1/chat/completions" },
   local_llm_model:       { env: "LOCAL_LLM_MODEL",          default: "gemma-4-26b-a4b" },
   local_llm_roles:       { env: "LOCAL_LLM_ROLES",          default: "" },
+  model_tier_assignment: { env: "MODEL_TIER_ASSIGNMENT",    default: "" },
+  model_tier_fallback:   { env: "MODEL_TIER_FALLBACK",      default: "" },
+  role_tier_overrides:   { env: "ROLE_TIER_OVERRIDES",      default: "" },
   tts_url:               { env: "TTS_URL",                  default: null },
   tts_normal_ref:        { env: "TTS_NORMAL_REF",            default: null },
   tts_whisper_ref:       { env: "TTS_WHISPER_REF",           default: null },

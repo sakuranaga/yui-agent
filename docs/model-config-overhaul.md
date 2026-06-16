@@ -48,7 +48,7 @@ ModelEntry {
   model_id     : string                     — 各 provider の model 名
   base_url     : string|null                — OpenAI 互換の **base** (例 `http://llm:8081/v1`、provider=local_openai 時必須)。adapter が `/chat/completions` を付加する (= full endpoint を入れない。§6 で正規化)
   api_key_ref  : 'anthropic'|'openai'|...|null  — どの保存済みキーを使うか (local は不要/任意)
-  capabilities : { reachable, supports_tools, tested_at, last_error }  — 能力テスト結果 (§2.3)
+  capabilities : { reachable, supportsTools, testedAt, lastError }  — 能力テスト結果 (§2.3。camelCase = 既存 JSONB 慣習 ReminderSchedule 等に合わせる)
   created_at, updated_at
 }
 ```
@@ -65,7 +65,7 @@ TierAssignment {
   heavy : model_entry_id    — 複雑タスク/リサーチ/コーディング (tool 必須)
 }
 ```
-- 各 tier に**能力ゲートを適用**: main/heavy は `capabilities.supports_tools === true` のモデルしか割当不可。sub は不問。
+- 各 tier に**能力ゲートを適用**: main/heavy は `capabilities.supportsTools === true` のモデルしか割当不可。sub は不問。
 - **role→tier map** で既存 role を 3 分類 (§4)。`resolveTier(role)` が tier を返し、TierAssignment から model_entry を引く。
 
 ### 2.3 能力テスト (接続テスト) + ゲート
@@ -76,13 +76,13 @@ TierAssignment {
    - Anthropic: `tools` + `tool_choice:{type:'tool',name:'echo'}` で tool_use ブロックが返るか。
    - OpenAI 互換 (openai/grok/local_openai): `tools` + `tool_choice` で `tool_calls` が返るか。
    - Gemini: function calling 形式で確認。
-   - **成功 → `supports_tools=true`**。endpoint がそもそも `tools` を受け付けず 4xx → `false`。
-3. 結果を `capabilities` に保存 (`tested_at`, `last_error`)。
+   - **成功 → `supportsTools=true`**。endpoint がそもそも `tools` を受け付けず 4xx → `false`。
+3. 結果を `capabilities` に保存 (`testedAt`, `lastError`)。
 
 > **アダプタ拡張が前提 (Codex 指摘 #4)**: 現 `CallLlmOpts` / 各アダプタ送信 body に `tool_choice` が無い (`llm.ts:215,308` / `openai.ts:305` / `gemini.ts:224`)。`tools` だけで probe すると tool 対応モデルでも text 応答して **false negative** になりうる。→ probe 経路 (および将来の tool_choice 利用) のため、**`tool_choice` を provider 別に送れるようアダプタを拡張** (Anthropic `tool_choice:{type:'tool'}` / OpenAI 互換 `tool_choice` / Gemini function calling config) してから probe を実装する。M2 のスコープに含める。
 
 **ゲート (= ご主人様の「親切に」)**:
-- UI: main/heavy の割当ドロップダウンは **`supports_tools=true` のモデルのみ表示**。未テスト/不可は選べない (理由ツールチップ "tool 未対応のため main/heavy に使えません")。
+- UI: main/heavy の割当ドロップダウンは **`supportsTools=true` のモデルのみ表示**。未テスト/不可は選べない (理由ツールチップ "tool 未対応のため main/heavy に使えません")。
 - API: 保存時にも server 側で再検証し、tool 必須枠への tool 不可モデル割当を**弾く** (UI バイパス対策)。
 
 ### 2.4 tier 別フォールバック
@@ -121,7 +121,7 @@ CREATE TABLE model_registry (
   model_id      TEXT NOT NULL,
   base_url      TEXT,                   -- local_openai 時必須
   api_key_ref   TEXT,                   -- anthropic|openai|gemini|grok|NULL
-  capabilities  JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {reachable,supports_tools,tested_at,last_error}
+  capabilities  JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {reachable,supportsTools,testedAt,lastError}
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
