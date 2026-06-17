@@ -22,7 +22,8 @@ import {
 import { detectProvider } from "@/lib/llm-providers/detect";
 
 export type ModelProvider = "anthropic" | "openai" | "gemini" | "grok" | "local_openai";
-export type TierName = "main" | "sub" | "heavy";
+// "tool" = ツール選択専用 tier (Executor #2)。xLAM 等の function-calling 専用モデルを割当。
+export type TierName = "main" | "sub" | "heavy" | "tool";
 
 export type ModelEntry = {
   id: string;
@@ -131,13 +132,15 @@ export async function deleteModel(id: string): Promise<boolean> {
 
 // ───── tier 割当 / fallback (ai_settings KV) ─────
 
-const EMPTY_ASSIGNMENT: TierAssignment = { main: null, sub: null, heavy: null };
+const EMPTY_ASSIGNMENT: TierAssignment = { main: null, sub: null, heavy: null, tool: null };
 
 function parseTierJson(raw: string | null): TierAssignment {
   if (!raw || !raw.trim()) return { ...EMPTY_ASSIGNMENT };
   try {
     const o = JSON.parse(raw) as Partial<TierAssignment>;
-    return { main: o.main ?? null, sub: o.sub ?? null, heavy: o.heavy ?? null };
+    // tool は後付け tier なので既存データ (main/sub/heavy のみ) では null = executor role が
+    // sub fallback / 防御 ephemeral へ倒れる (= 設定で割り当てるまで安全に動く)。
+    return { main: o.main ?? null, sub: o.sub ?? null, heavy: o.heavy ?? null, tool: o.tool ?? null };
   } catch {
     return { ...EMPTY_ASSIGNMENT };
   }
@@ -288,7 +291,8 @@ export async function seedModelRegistryIfEmpty(): Promise<{ seeded: number }> {
     await tx.insert(modelRegistry).values(values);
 
     // tier 割当: heavy=sub (= 現 specialist は Haiku 解決なので挙動保存)。同 tx で ai_settings upsert。
-    const assignment = JSON.stringify({ main: mainId, sub: subId, heavy: subId });
+    // tool = sub と同じ entry を既定 (= ネイティブ tool-use 可能な Haiku。後で設定で xLAM 等に変更)。
+    const assignment = JSON.stringify({ main: mainId, sub: subId, heavy: subId, tool: subId });
     await tx
       .insert(aiSettings)
       .values({ key: "model_tier_assignment", value: assignment, isSecret: false, updatedAt: new Date() })

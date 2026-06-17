@@ -97,10 +97,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       const toolRequiredRefs = [
         assignment.main === id ? "メイン" : null,
         assignment.heavy === id ? "ヘビー" : null,
+        assignment.tool === id ? "ツール選択" : null,
         fallback.main === id ? "メイン fallback" : null,
         fallback.heavy === id ? "ヘビー fallback" : null,
+        fallback.tool === id ? "ツール選択 fallback" : null,
         ...Object.entries(roleOverrides)
-          .filter(([role, val]) => val === id && roleRequiresTool(role)) // main/heavy role の entry id 直指定
+          .filter(([role, val]) => val === id && roleRequiresTool(role)) // main/heavy/tool role の entry id 直指定
           .map(([role]) => `role 上書き (${role})`),
       ].filter((s): s is string => s !== null);
       if (toolRequiredRefs.length > 0) {

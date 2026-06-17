@@ -92,7 +92,7 @@ async function main() {
     const tSub = await createModel({ label: "t-sub", provider: "anthropic", modelId: "claude-haiku-4-5", apiKeyRef: "anthropic" });
     const tHeavy = await createModel({ label: "t-heavy", provider: "anthropic", modelId: "claude-opus-4-7", apiKeyRef: "anthropic" });
     createdIds.push(tMain.id, tSub.id, tHeavy.id);
-    await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id });
+    await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id, tool: null });
     await setRoleTierOverrides({});
 
     // ── 2. resolveEntry: 既定 tier 割当 ──
@@ -139,8 +139,8 @@ async function main() {
       const dead = await createModel({ label: "t-dead", provider: "local_openai", modelId: "dead", baseUrl: "http://127.0.0.1:1/v1" });
       const live = await createModel({ label: "t-live", provider: "local_openai", modelId: "mock", baseUrl: mock.baseUrl });
       createdIds.push(dead.id, live.id);
-      await setTierAssignment({ main: tMain.id, sub: dead.id, heavy: tHeavy.id });
-      await setTierFallback({ main: null, sub: live.id, heavy: null });
+      await setTierAssignment({ main: tMain.id, sub: dead.id, heavy: tHeavy.id, tool: null });
+      await setTierFallback({ main: null, sub: live.id, heavy: null, tool: null });
       await setRoleTierOverrides({});
 
       const res = await callLlm("judge", {
@@ -166,8 +166,8 @@ async function main() {
       } else {
         // フラグをクリアして移行を走らせる。assignment.sub は hosted (tSub) にしておく。
         await updateAiSettings({ model_local_roles_migrated: "" });
-        await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id });
-        await setTierFallback({ main: null, sub: null, heavy: null });
+        await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id, tool: null });
+        await setTierFallback({ main: null, sub: null, heavy: null, tool: null });
         await setRoleTierOverrides({});
 
         // 移行が local entry を新規作成した場合に回収するため、前後の registry id を比較。
@@ -209,7 +209,7 @@ async function main() {
         check(r.migrated === false, "local 未使用 → migrated=false");
         check((await getAiSetting("model_intent_roles_migrated")) === "1", "フラグは立つ");
       } else {
-        await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id });
+        await setTierAssignment({ main: tMain.id, sub: tSub.id, heavy: tHeavy.id, tool: null });
         await setRoleTierOverrides({});
         const idsBefore = new Set((await listModels()).map((m) => m.id));
         const r = await migrateIntentRolesToLocal();

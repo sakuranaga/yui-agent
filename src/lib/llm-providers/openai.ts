@@ -215,7 +215,48 @@ function translateFinishReason(
 }
 
 /** OpenAI 応答を Anthropic.Message 互換形に詰め直す */
-function translateResponse(res: OAIResponse, model: string): Anthropic.Message {
+/**
+ * xLAM 等の function-calling 専用モデル (llama.cpp --skip-chat-parsing) は、tool call を
+ * native `tool_calls` ではなく content に JSON 配列で返す: `[{"name":..,"arguments":{..}}]`。
+ * native tool_calls が無く content がこの形なら tool_use に正規化する (§12.3 normalizer)。
+ * **`allowed` (露出ツール名) に一致する name のみ採用** (Codex High: 通常の JSON っぽい本文を
+ * 誤って tool_use 化しない / 未知 tool を作らない)。tool-call 形でなければ null (= 通常 text)。
+ */
+function parseContentToolCalls(
+  content: string,
+  allowed: Set<string>,
+): Array<{ name: string; arguments: unknown }> | null {
+  let s = content.trim();
+  if (!s) return null;
+  const fence = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/); // markdown code fence を剥がす
+  if (fence) s = fence[1].trim();
+  if (!(s.startsWith("[") || s.startsWith("{"))) return null; // tool-call の形でない
+  try {
+    const parsed = JSON.parse(s);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    const calls: Array<{ name: string; arguments: unknown }> = [];
+    for (const x of arr) {
+      if (!x || typeof x !== "object") continue;
+      const name = (x as { name?: unknown }).name;
+      if (typeof name !== "string" || !allowed.has(name)) continue; // 露出ツール allowlist のみ
+      let args: unknown = (x as { arguments?: unknown }).arguments ?? {};
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch { args = {}; }
+      }
+      if (!args || typeof args !== "object" || Array.isArray(args)) args = {}; // plain object のみ (配列は不可)
+      calls.push({ name, arguments: args });
+    }
+    return calls.length > 0 ? calls : null;
+  } catch {
+    return null;
+  }
+}
+
+function translateResponse(
+  res: OAIResponse,
+  model: string,
+  allowedToolNames?: Set<string>,
+): Anthropic.Message {
   const choice = res.choices[0];
   if (!choice) {
     throw new Error("OpenAI: empty choices");
@@ -226,14 +267,30 @@ function translateResponse(res: OAIResponse, model: string): Anthropic.Message {
   // chain-of-thought がそのまま user に漏れる。content 空 (= 打ち切り/未生成) は呼側で扱う。
   // (server 側で thinking を reasoning_content に分離する形式 = --reasoning-format deepseek 等が前提)
   const textOut = choice.message.content || "";
-  if (textOut.length > 0) {
-    content.push({
-      type: "text",
-      text: textOut,
-      citations: [],
+  const nativeToolCalls = choice.message.tool_calls ?? [];
+  // native tool_calls が無く、かつ **tools を渡したリクエスト** の時だけ content を tool-call
+  // として正規化試行 (Codex High: tools 無しの通常応答を tool_use 化しない)。allowlist 必須。
+  const contentToolCalls =
+    nativeToolCalls.length === 0 && allowedToolNames && allowedToolNames.size > 0
+      ? parseContentToolCalls(textOut, allowedToolNames)
+      : null;
+
+  if (contentToolCalls) {
+    // content が tool-call 形 → tool_use に正規化 (text block は出さない)
+    contentToolCalls.forEach((c, i) => {
+      content.push({ type: "tool_use", id: `xlam_${res.id}_${i}`, name: c.name, input: c.arguments ?? {} });
     });
+  } else if (textOut.length > 0) {
+    // 診断: tools を渡したのに content を tool_use 化できなかった (xLAM 等が special token prefix /
+    // 全角 / 非 JSON / allowlist 外 name を返した等)。生 content を出して原因を可視化する。
+    if (allowedToolNames && allowedToolNames.size > 0) {
+      console.warn(
+        `[openai-adapter] tools 有りだが content を tool_use 化できず (no_tool_calls になる): ${JSON.stringify(textOut.slice(0, 400))}`,
+      );
+    }
+    content.push({ type: "text", text: textOut, citations: [] });
   }
-  for (const tc of choice.message.tool_calls ?? []) {
+  for (const tc of nativeToolCalls) {
     let input: unknown = {};
     try {
       input = JSON.parse(tc.function.arguments || "{}");
@@ -255,7 +312,8 @@ function translateResponse(res: OAIResponse, model: string): Anthropic.Message {
     role: "assistant",
     model,
     content,
-    stop_reason: translateFinishReason(choice.finish_reason),
+    // content から tool_use を正規化した場合は tool_use 扱い (finish_reason は stop でも)
+    stop_reason: contentToolCalls ? "tool_use" : translateFinishReason(choice.finish_reason),
     stop_sequence: null,
     usage: {
       input_tokens: res.usage?.prompt_tokens ?? 0,
@@ -365,5 +423,9 @@ export async function callOpenAICompat(opts: OpenAICompatOpts): Promise<Anthropi
   }
 
   const data = (await res.json()) as OAIResponse;
-  return translateResponse(data, opts.model);
+  return translateResponse(
+    data,
+    opts.model,
+    opts.tools && opts.tools.length > 0 ? new Set(opts.tools.map((t) => t.name)) : undefined,
+  );
 }

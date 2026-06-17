@@ -4,7 +4,7 @@
  * モデルレジストリ管理 UI (#206 M4)。
  *
  * - 登録モデル一覧: 能力バッジ (到達 / tool) + テスト / 編集 / 削除 / 追加
- * - tier 割当: main / sub / heavy + fallback (main/heavy は tool 対応モデルのみ選択可)
+ * - tier 割当: main / sub / heavy / tool + fallback (main/heavy/tool は tool 対応モデルのみ選択可)
  * - role 別上書き (折りたたみ): 役割ごとに既定 tier or 特定モデルへ
  *
  * バックエンド: /api/model-registry, /api/model-registry/[id], /[id]/test, /tiers
@@ -36,7 +36,7 @@ type ModelEntry = {
   maxTokens: number;
 };
 
-type TierName = "main" | "sub" | "heavy";
+type TierName = "main" | "sub" | "heavy" | "tool";
 type Tiers = {
   assignment: Record<TierName, string | null>;
   fallback: Record<TierName, string | null>;
@@ -55,6 +55,7 @@ const TIER_META: Array<{ key: TierName; label: string; hint: string; toolRequire
   { key: "main", label: "メイン", hint: "Yui 本体の応答 (tool 必須)", toolRequired: true },
   { key: "sub", label: "サブ", hint: "要約・分類など軽量背景タスク", toolRequired: false },
   { key: "heavy", label: "ヘビー", hint: "複雑タスク・専門エージェント (tool 必須)", toolRequired: true },
+  { key: "tool", label: "ツール選択", hint: "Executor #2 のツール選択専用 (xLAM 等の function-calling モデル)", toolRequired: true },
 ];
 
 /** role → 表示名 + 既定 tier (llm.ts DEFAULT_ROLE_TIER と一致させる)。 */
@@ -77,6 +78,7 @@ const ROLE_META: Array<{ role: string; label: string; tier: TierName }> = [
   { role: "notify", label: "進捗連絡整形", tier: "sub" },
   { role: "intent", label: "ツール間変換", tier: "sub" },
   { role: "project_suggest", label: "プロジェクト提案", tier: "sub" },
+  { role: "executor", label: "ツール選択 (#2 Executor)", tier: "tool" },
   { role: "specialist", label: "専門エージェント", tier: "heavy" },
 ];
 
@@ -336,7 +338,7 @@ export default function ModelRegistryManager() {
         <h3 className="ai-card-title">登録モデル</h3>
         <p className="ai-card-note">
           hosted (Anthropic / OpenAI / Gemini / Grok) とローカル (OpenAI 互換) のモデルを登録します。
-          「テスト」で到達性と tool 対応を確認すると、メイン / ヘビー 枠に割り当てられるようになります。
+          「テスト」で到達性と tool 対応を確認すると、メイン / ヘビー / ツール選択 枠に割り当てられるようになります。
         </p>
 
         <div className="ai-model-list">
@@ -463,9 +465,9 @@ export default function ModelRegistryManager() {
       {/* === tier 割当 === */}
       {tiers && (
         <section className="ai-card">
-          <h3 className="ai-card-title">モデル割当 (3 段)</h3>
+          <h3 className="ai-card-title">モデル割当 (4 段)</h3>
           <p className="ai-card-note">
-            メイン / ヘビー は tool 対応が確認できたモデルのみ選べます (未テストは選択不可)。
+            メイン / ヘビー / ツール選択 は tool 対応が確認できたモデルのみ選べます (未テストは選択不可)。
             fallback は主モデルが落ちた時の切替先です。
           </p>
           {TIER_META.map((tm) => (
@@ -493,7 +495,7 @@ export default function ModelRegistryManager() {
               <p className="ai-hint">役割ごとに既定 tier ではなく特定モデルを使わせます (例: 軽量処理をローカルに固定)。</p>
               {ROLE_META.map((rm) => {
                 const cur = tiers.roleOverrides[rm.role] ?? "";
-                const toolReq = rm.tier === "main" || rm.tier === "heavy";
+                const toolReq = rm.tier === "main" || rm.tier === "heavy" || rm.tier === "tool";
                 return (
                   <div className="ai-role-override" key={rm.role}>
                     <span className="ai-role-override-label">{rm.label}<span className="ai-role-override-tier"> (既定: {rm.tier})</span></span>

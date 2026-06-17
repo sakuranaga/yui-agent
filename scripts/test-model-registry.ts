@@ -77,7 +77,7 @@ async function main() {
 
     // --- 3. tier 割当 KV ---
     console.log("[3] tier 割当");
-    await setTierAssignment({ main: e.id, sub: local.id, heavy: e.id });
+    await setTierAssignment({ main: e.id, sub: local.id, heavy: e.id, tool: null });
     const a = await getTierAssignment();
     check(a.main === e.id && a.sub === local.id && a.heavy === e.id, "set→get で一致");
     check(JSON.parse((await getAiSetting("model_tier_assignment")) ?? "{}").main === e.id, "ai_settings に JSON 保存");

@@ -23,10 +23,10 @@ import type {
 export type GateViolation = { slot: string; entryId: string; reason: string };
 export type TierSlot = { label: string; entryId: string | null; requiresTool: boolean };
 
-/** role の既定 tier が tool 必須枠 (main/heavy) か。 */
+/** role の既定 tier が tool 必須枠 (main/heavy/tool) か。 */
 export function roleRequiresTool(role: string): boolean {
   const tier = resolveTier(role as LlmRole);
-  return tier === "main" || tier === "heavy";
+  return tier === "main" || tier === "heavy" || tier === "tool";
 }
 
 /**
@@ -63,8 +63,8 @@ export function findEntryReferences(
   roleOverrides: RoleTierOverrides
 ): string[] {
   const refs: string[] = [];
-  const tiers: Array<keyof TierAssignment> = ["main", "sub", "heavy"];
-  const tierLabel: Record<string, string> = { main: "メイン", sub: "サブ", heavy: "ヘビー" };
+  const tiers: Array<keyof TierAssignment> = ["main", "sub", "heavy", "tool"];
+  const tierLabel: Record<string, string> = { main: "メイン", sub: "サブ", heavy: "ヘビー", tool: "ツール選択" };
   for (const t of tiers) {
     if (assignment[t] === id) refs.push(`tier 割当 (${tierLabel[t]})`);
     if (fallback[t] === id) refs.push(`fallback (${tierLabel[t]})`);
@@ -72,7 +72,7 @@ export function findEntryReferences(
   for (const [role, val] of Object.entries(roleOverrides)) {
     if (val === id) {
       refs.push(`role 上書き (${role})`);
-    } else if ((val === "main" || val === "sub" || val === "heavy") && assignment[val] === id) {
+    } else if ((val === "main" || val === "sub" || val === "heavy" || val === "tool") && assignment[val] === id) {
       // tier 名経由の間接参照も「なぜ消せないか」表示に含める (Codex 中-2)。
       refs.push(`role 上書き (${role} → ${tierLabel[val]})`);
     }

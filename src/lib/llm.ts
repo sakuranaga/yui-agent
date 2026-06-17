@@ -49,6 +49,7 @@ export type LlmRole =
   | "notify"        // MCP notify: 開発エージェントの進捗連絡 → 結衣口調に整形 (ローカル優先 + Haiku fallback)
   | "intent"        // cross-tool 変換 (artifact → 別ツールの下書き JSON、ローカル優先)
   | "project_suggest" // artifact → 関連プロジェクト提案 (ローカル優先)
+  | "executor"     // Executor #2 のツール選択 (tool tier = xLAM 等の function-calling 専用モデル)
   | "specialist";  // specialist 個別呼び出し (model は spec.model で上書き)
 
 /** role → 3 tier (main/sub/heavy) の既定マップ (#206 §4)。
@@ -72,6 +73,7 @@ const DEFAULT_ROLE_TIER: Record<LlmRole, TierName> = {
   notify: "sub",
   intent: "sub",
   project_suggest: "sub",
+  executor: "tool", // #2 ツール選択は tool tier (未割当なら sub fallback / 防御 Haiku)
   specialist: "heavy",
 };
 
@@ -142,6 +144,13 @@ export async function resolveEntry(role: LlmRole, override?: string): Promise<Re
   // 3. 既定 tier 割当。
   const e = await entryForTier(tier);
   if (e) return { entry: e, tier };
+
+  // 3.5. tool tier 未割当 (= 後付け tier を設定していない既存環境) は sub tier に倒す。
+  //  設定で tool を割り当てるまで sub の実モデル (ネイティブ tool-use 可能な Haiku 等) を使う。
+  if (tier === "tool") {
+    const sub = await entryForTier("sub");
+    if (sub) return { entry: sub, tier: "sub" };
+  }
 
   // 4. 防御: 割当未設定 / entry 消失 → 旧 anthropic 設定から ephemeral 合成。
   const cfg = await getAnthropicConfig();

@@ -66,14 +66,15 @@ export async function PUT(req: NextRequest) {
     // ゲートは「この PUT で変更されたスロットだけ」に適用する (seed 由来の未テスト entry を
     // grandfather し、無関係な変更を過剰にブロックしない)。main/heavy スロットは独立なので
     // 変更スロットのみの検証で漏れは出ない。
-    const tiers: Array<"main" | "sub" | "heavy"> = ["main", "sub", "heavy"];
+    const tiers: Array<"main" | "sub" | "heavy" | "tool"> = ["main", "sub", "heavy", "tool"];
+    const requiresTool = (t: "main" | "sub" | "heavy" | "tool") => t === "main" || t === "heavy" || t === "tool";
     const slots: TierSlot[] = [];
     for (const t of tiers) {
       if (body.assignment && t in body.assignment && assignment[t] !== curAssignment[t]) {
-        slots.push({ label: `メイン/サブ/ヘビー (${t})`, entryId: assignment[t], requiresTool: t === "main" || t === "heavy" });
+        slots.push({ label: `tier (${t})`, entryId: assignment[t], requiresTool: requiresTool(t) });
       }
       if (body.fallback && t in body.fallback && fallback[t] !== curFallback[t]) {
-        slots.push({ label: `fallback (${t})`, entryId: fallback[t], requiresTool: t === "main" || t === "heavy" });
+        slots.push({ label: `fallback (${t})`, entryId: fallback[t], requiresTool: requiresTool(t) });
       }
     }
     const byId = new Map<string, ModelEntry>(entries.map((e) => [e.id, e]));
@@ -99,7 +100,7 @@ export async function PUT(req: NextRequest) {
     if (violations.length > 0) {
       return NextResponse.json(
         {
-          error: "tool 未対応のモデルは メイン / ヘビー 枠に割り当てできません。先に接続テストで tool 対応を確認してください。",
+          error: "tool 未対応のモデルは メイン / ヘビー / ツール選択 枠に割り当てできません。先に接続テストで tool 対応を確認してください。",
           violations,
         },
         { status: 422 }
