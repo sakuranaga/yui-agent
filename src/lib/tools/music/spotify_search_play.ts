@@ -38,6 +38,9 @@ export const spotifySearchPlay: ToolDef = {
   domain: "music",
   allowedModes: ["normal", "timer"],
   confirmationPolicy: "auto",
+  // transport だが戻り値に再生した track/playlist・候補・trivia を含み結論に反映する必要があるため
+  // 既定 (transport→silent) を上書きして report (docs/tool-dispatch-redesign.md §4.2、Codex P1 Low)。
+  dispatch: { disposition: "report" },
   availabilityKey: "spotify:premium",
   isAvailable: isSpotifyPremium,
   handler: async (input) => {

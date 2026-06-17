@@ -49,6 +49,25 @@ export type ConfirmationPolicy =
   | "confirm_destructive"     // 削除 / 不可逆更新
   | "confirm_external_send";  // 外部への送信
 
+// ── ツール実行ディスパッチ (docs/tool-dispatch-redesign.md §4.1) ──
+// P1: 型 + 既定推定のみ整備。挙動は変えない (消費は後続フェーズ)。
+
+/** 結果を会話に戻すか。silent=B の ack で完結 (失敗のみ報告) / report=C が結果を反映。 */
+export type ToolDisposition = "silent" | "report";
+
+/** 判定/実行の実行系。inline=モデル無しで handler 直接 / agent=重いモデル sub-loop /
+ *  {specialist}=独自モデルの specialist sub-agent。 */
+export type ToolExecutor = "inline" | "agent" | { specialist: SpecialistId };
+
+/** ツール毎のディスパッチ方針。既定は surface / confirmationPolicy から推定 (resolveDispatch)、
+ *  ToolDef.dispatch で部分上書き可能。 */
+export type ToolDispatch = {
+  disposition: ToolDisposition;
+  executor: ToolExecutor;
+  /** executor が agent/specialist の時、その tool 用の集中システムプロンプト。 */
+  systemPrompt?: string;
+};
+
 export type ToolDef = {
   /** Anthropic Tool 名 (snake_case 推奨) */
   name: string;
@@ -67,6 +86,11 @@ export type ToolDef = {
   confirmationPolicy?: ConfirmationPolicy;
   isAvailable?: (ctx: Pick<ToolContext, "sessionId" | "availabilityCache">) => Promise<boolean>;
   availabilityKey?: string;
+
+  // ── ディスパッチ方針 (docs/tool-dispatch-redesign.md §4.2) ──
+  // 省略時は resolveDispatch が surface / confirmationPolicy から推定。
+  // 部分指定で推定値を上書き (例: 外部サービス mutate を report に倒す)。
+  dispatch?: Partial<ToolDispatch>;
 };
 
 /** runTool が ToolResult を作るために使う */

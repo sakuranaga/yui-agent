@@ -4,7 +4,14 @@
  * 設計: docs/tool-architecture.md §4.7
  */
 import type Anthropic from "@anthropic-ai/sdk";
-import type { ToolDef, ToolContext, ToolMode, ToolCaller } from "./types";
+import type {
+  ToolDef,
+  ToolContext,
+  ToolMode,
+  ToolCaller,
+  ToolDispatch,
+  ToolDisposition,
+} from "./types";
 import { ALL_TOOLS } from "./registry";
 import { wrapUntrusted, buildUntrustedContentGuard } from "./untrusted-wrap";
 import { requestUserConfirm, buildConfirmGuard } from "./confirm";
@@ -60,6 +67,56 @@ export function toAnthropicTools(tools: ToolDef[]): Anthropic.Tool[] {
     description: t.description,
     input_schema: t.input_schema as Anthropic.Tool["input_schema"],
   }));
+}
+
+// ── ディスパッチ方針の推定 (docs/tool-dispatch-redesign.md §4.2) ──
+// P1: 推定 + 上書き解決のみ。挙動は変えない (消費は後続フェーズ)。
+
+/**
+ * surface / confirmationPolicy から disposition を保守的に推定。
+ *   - confirm 必要 (削除/外部送信) → report (黙って投げっぱなし禁止)
+ *   - read / external (検索・取得) → report (データを会話へ)
+ *   - mutate / transport (純ローカル行動) → silent (B の ack で完結)
+ *   - 不明 → report (保守側)
+ * 外部サービス mutate で report にしたい等は ToolDef.dispatch で上書き。
+ */
+function inferDisposition(tool: ToolDef): ToolDisposition {
+  if (
+    tool.confirmationPolicy === "confirm_destructive" ||
+    tool.confirmationPolicy === "confirm_external_send"
+  ) {
+    return "report";
+  }
+  switch (tool.surface) {
+    case "read":
+    case "external":
+      return "report";
+    case "mutate":
+    case "transport":
+      return "silent";
+    default:
+      return "report";
+  }
+}
+
+/**
+ * ツールの実効ディスパッチ方針を解決する。
+ * 既定推定 (inferDisposition / executor=inline) に ToolDef.dispatch を部分上書きで重ねる。
+ * ただし confirm 必要ツールは **上書きでも silent にできない** = 最後に report を強制する
+ * (黙って投げっぱなし禁止、docs §4.2)。
+ */
+export function resolveDispatch(tool: ToolDef): ToolDispatch {
+  const requiresReport =
+    tool.confirmationPolicy === "confirm_destructive" ||
+    tool.confirmationPolicy === "confirm_external_send";
+  const disposition: ToolDisposition = requiresReport
+    ? "report"
+    : tool.dispatch?.disposition ?? inferDisposition(tool);
+  return {
+    disposition,
+    executor: tool.dispatch?.executor ?? "inline",
+    systemPrompt: tool.dispatch?.systemPrompt,
+  };
 }
 
 /** 露出 tool 群に応じて system guard を組み立てる */
