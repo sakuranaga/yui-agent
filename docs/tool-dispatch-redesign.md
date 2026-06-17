@@ -423,6 +423,17 @@ dispatchTool(call, ctx):          // ← ツール実装は書かない。呼び
   - 各ツール **最低 seed 例文数**を決める (direct tool ≥3、routing が紛らわしいもの ≥10)。alarm/reminder/todo/calendar のような**競合ツールには negative example も**設計する。
 - **スコアリング (Codex Medium④)**: 単純 `max` は汎用例文 1 個でそのツールが勝つので雑。**`kind` 別重み** (example=1.0 / description=0.85) + **specificity 補正** (短すぎ・汎用語だけの例文は減点) を入れる。max だけでなく top2/3 平均も評価候補に。
 - **ハイブリッド index**: 各ツールに「例文 N 個 + description 1 個」の複数ベクトル、上記スコアでツールを順位付け。
+- **ハイブリッド検索 (dense + PGroonga lexical、日本語対応)**: 記憶システム §I1 の教訓 — `to_tsvector('simple')` は日本語を語に割れず lexical が死ぬ (文まるごと 1 トークン化、「タイマー」が部分一致しない)。tool_index では **lexical チャネルを PGroonga で正しく日本語対応**する。
+  - **dense** = pgvector cosine (例文/description 埋め込み、上記スコア) → 意味・言い換え。
+  - **lexical** = PGroonga 全文検索 (`&@~` + `pgroonga_score`) を `text` 行に対して → 短い具体語・正確なキーワード (「タイマー」「リマインド」) の取りこぼし救済。
+  - **用語訂正 (Codex Medium)**: PGroonga の `pgroonga_score` は **TF 系 lexical score で BM25 ではない** (公式 doc)。「日本語 BM25」ではなく **「日本語 lexical score」** と呼ぶ。真の BM25 が要るなら PGroonga scorer customization を別設計。
+  - **合成は RRF を既定 (Codex Medium)**: cosine は 0-1 だが PGroonga score は TF 的で長さ依存 → 生 weighted-sum は lexical が暴れる。**dense/lexical を別々に top-K 取り `1/(k+rank)` で融合 (RRF)** を既定。weighted-sum を採るなら `lexical_norm = log1p(score)/max(log1p(score))` (per query、hit 無しは 0)、`dense = clamp(1-distance,0,1)`、正規化後 `dense=0.75 / lexical=0.25` 起点で eval 調整。
+  - **tokenizer は要決定 (Codex Medium)**: PGroonga default は `TokenBigram`、MeCab は `WITH (tokenizer='TokenMecab')` 明示が必要。**短い tool 例文では MeCab が未知語に弱く `TokenBigram`/`TokenNgram` が recall で勝つ可能性** → eval で MeCab vs Bigram を比較して確定。
+  - **stale 時の段階 fallback (Codex Medium)**: PGroonga lexical は **embedding 非依存**。dense が stale/次元不一致でも lexical は生きるので、いきなり full catalog に倒さない:
+    1. dense fresh: `floor ∪ denseTopK ∪ lexicalTopK ∪ dependentReads`
+    2. dense stale/dim mismatch だが lexical 可: `floor ∪ lexicalTopK ∪ dependentReads`
+    3. lexical も不可 / coverage 不足: `full permitted catalog fallback`
+  - インフラ (PGroonga + pgvector 同居 image・データ安全) は **§12.6**。
 - **例文の出所**: yui-prompt の `TOOL_USAGE_GUIDANCE` (alarm vs reminder / once vs habit の routing 知識) を**例文コーパスに転用** (dead code の昇華) + 手書き seed。将来は実利用ログ (発話→実使用ツール) から増やす。
 - **クエリ (Codex Medium⑫ + §4.0 trusted 連携)**: **trusted な user 発話を基本**にする。assistant 発話 / tool result は原則入れない (別トピックに引っ張られる)。照応 (「それ消して」「さっきの予定」) 解決に直近文脈が要る時のみ**短い structured context** を足す。**untrusted テキストは query に混ぜない** (混ぜるなら明示的に重みを落とす)。
 - **index 例文 ≠ Executor payload**: index は「マッチ専用の影」、Executor に渡す payload は従来通り **name + description + schema**。
@@ -491,9 +502,11 @@ Executor は **1 種の標準リクエスト**を投げ、返りの**エンコ�
 - **`embedding_model` を持つ理由**: 「モデル変更 → 再インデックス」を**自動検知**するため。**異なるモデルのベクトル同士の比較は無意味**なので、クエリ時の設定モデルと index のモデルが食い違ったら「index は stale」と判定できる。
 - **embedding は既存 `embed()` (`@/lib/embed`) を流用** (設定の embed モデル、1024 次元、`getEmbedConfig`)。このアプリは Embeddings 必須なので**新規依存ゼロ**。
 - **HNSW / UNIQUE は既存規約通り生 SQL migration 側**で定義 (drizzle schema には index/constraint を載せない、`note_chunks`/`memory_chunks` と同方針)。`UNIQUE(tool_name, kind, text_hash, index_version)`。
-- **stale 検知後の挙動 (Codex High⑨、肝)**: クエリ時に stale を検知したら — 同期 re-embed は遅いので**やらない**。代わりに **① stale vector 検索は使わず full permitted catalog fallback** (§4.0 policy 露出ツールのみ、~56 なら劣化モードとして許容)、**② background reindex job を enqueue**、**③ ユーザーには出さず health/管理ログに `tool_index_stale`**。
-- **partial stale の閾値 (Codex 2巡目 Medium)**: `active index_version` と一致する行だけ **fresh** とみなす。**fresh tool coverage < 90% または候補数 < K/2** なら full permitted catalog fallback。
-- **次元が変わるモデルへの変更は「再インデックス」では吸収できない (Codex High⑩)**: `embed()` は設定次元と返却次元の不一致で throw ([src/lib/embed.ts:65](src/lib/embed.ts))、DB も `vector(1024)` 固定 ([src/db/schema.ts:559](src/db/schema.ts))。→ **`cfg.dimensions !== embedding_dimensions` なら vector retrieval を無効化し full permitted catalog fallback**。次元変更は「再インデックス」ではなく **「schema migration + HNSW rebuild + reindex」** と明記。**1024 次元モデルに限り再インデックスで吸収可能**。
+- **PGroonga index (日本語 lexical、§12.2 ハイブリッド)**: migration で `CREATE EXTENSION IF NOT EXISTS pgroonga;` + `text` 列に `CREATE INDEX ... USING pgroonga (text) WITH (tokenizer='<eval 勝者>')` (**tokenizer 明示必須** — default は TokenBigram。**初期候補 TokenMecab だが、最終 tokenizer は §12.2 の recall eval で TokenMecab/TokenBigram/TokenNgram から確定**してから migration に固定する、Codex Medium)。dense の HNSW と併用。インフラは §12.6。
+- **用語の分離 (Codex Medium)**: embedding 再生成 = **reindex**、PGroonga index 再構築 = **`REINDEX INDEX <pgroonga idx>`** で別語にする (混同しない)。
+- **stale 検知後の挙動 (Codex High⑨、肝。fallback は §12.2 の 3 段に統一)**: クエリ時に stale を検知したら — 同期 re-embed は遅いので**やらない**。**① dense (stale vector) は使わず、PGroonga lexical が生きていれば `floor ∪ lexicalTopK ∪ dependentReads` に倒す** (lexical は embedding 非依存)、**② background reindex job を enqueue**、**③ ユーザーには出さず health/管理ログに `tool_index_stale`**。**lexical も不可 / coverage 不足のときだけ full permitted catalog fallback** (§4.0 policy 露出ツールのみ)。
+- **partial stale の閾値 (Codex 2巡目 Medium)**: `active index_version` と一致する行だけ **fresh** とみなす。**fresh tool coverage < 90% または候補数 < K/2** なら、まず **lexical-only fallback**、それでも不足なら full permitted catalog fallback (§12.2 の 3 段)。
+- **次元が変わるモデルへの変更は「再インデックス」では吸収できない (Codex High⑩)**: `embed()` は設定次元と返却次元の不一致で throw ([src/lib/embed.ts:65](src/lib/embed.ts))、DB も `vector(1024)` 固定 ([src/db/schema.ts:559](src/db/schema.ts))。→ **`cfg.dimensions !== embedding_dimensions` なら dense(vector) retrieval を無効化し、PGroonga lexical が可なら lexical-only に倒す (lexical 可なら full catalog にしない)。lexical も不可なら full permitted catalog fallback** (§12.2 の 3 段)。次元変更は「再インデックス」ではなく **「schema migration + HNSW rebuild + reindex」** と明記。**1024 次元モデルに限り再インデックスで吸収可能**。
 - **再インデックスは atomic に (Codex Medium⑪)**: 全行 in-place update は途中で落ちると新旧モデル混在。→ **新 `index_version` で別途作り切ってから active version を切替**。**active version は `tool_index_meta(key,value)` か既存 settings の `active_tool_index_version` で保持し、クエリは active version の行だけを見る** (Codex 2巡目 Low)。削除済みツール・変更済み description の掃除も reindex 手順に含める。
 - **再インデックス** = 全行の `text` を新モデルで再 embed → 新 version として `embedding` + `embedding_model` + `embedding_dimensions` を書き、active を切替。将来の embed モデル変更機能はこの手順で吸収 (次元同一の場合)。
 
@@ -502,6 +515,40 @@ Executor は **1 種の標準リクエスト**を投げ、返りの**エンコ�
 1. **per-model 分岐は禁止**。1 本設計 + 下流ガード (§5.5) で ~80%。**ただし下流ガードは「誤実行の停止」のみ — 未実行は retrieval fallback + telemetry で守る** (§12.0)。推奨モデル (Sonnet/Gemini/GPT クラス、または能力テスト合格ローカル) を README に明記。
 2. **併記 / 英語 description は不採用** (xLAM 過適合クラッチ)。将来オプションとして Google Translate append のみ記載 (§12.1)。
 3. **入力** = clean system (喋らせない・捏造禁止・不要なら空) + retrieval で絞った候補 + trusted な直近文脈 (§12.1)。
-4. **ツール検索** = 候補 = `floor(≤6 具体名) ∪ vectorTopK ∪ dependentReads` / 例文中心+description 保険・kind 別重み / **multi-tool recall (`all_required_in_candidates`) + no-op 時 retrieval fallback** (§12.2)。
+4. **ツール検索** = 候補 = `floor(≤6 具体名) ∪ vectorTopK ∪ dependentReads` / 例文中心+description 保険・kind 別重み / **dense + PGroonga lexical ハイブリッド (日本語 lexical を正しく対応、RRF 融合、stale 時は lexical-only に段階 fallback)** / **multi-tool recall (`all_required_in_candidates`) + no-op 時 retrieval fallback** (§12.2)。
 5. **出力** = canonical `{toolCalls,text,finishReason,raw}` → Native/JSON/XML/TEXT/**ERROR** の 5 分類、**痕跡条件列挙で TEXT≠Parse ERROR を明確化・mixed/refusal 対応・repair 1 回**、normalizer は **provider 共通境界**に集約 (§12.3)。
-6. **index スキーマ** = 元テキスト + `embedding_model` + `embedding_dimensions` + `index_version` 保持。**stale/次元不一致は full permitted catalog fallback + background reindex、再構築は version 切替で atomic** (§12.4)。
+6. **index スキーマ** = 元テキスト + `embedding_model` + `embedding_dimensions` + `index_version` 保持。**stale/次元不一致は lexical-only fallback (lexical 不可なら full permitted catalog) + background reindex、再構築は version 切替で atomic** (§12.4)。
+7. **インフラ** = PGroonga + pgvector 同居のカスタム image (PG15/bookworm 維持で collation 変更リスク低減・mismatch なら REINDEX)。**image 差替は dump+globals+volume snapshot → 復元検証 → 2 段 rollback (migration 前=image 戻し / 後=snapshot restore) の不可逆操作プロトコル必須** (§12.6)。
+
+### 12.6 インフラ: PGroonga + pgvector 同居 image (案A 採用、日本語 lexical 本命)
+
+日本語 lexical を PGroonga で実現するため、Postgres image に PGroonga と pgvector を同居させる。**本番データ (記憶・ノート・OAuth トークン) が入ったボリュームを触る不可逆操作**なので、下記プロトコルを厳守。
+
+#### image
+- **base は `FROM postgres:15-bookworm` を digest pin して明示** (Codex High①: `pgvector/pgvector:pg15` の Debian base は tag mutable で bookworm 保証にならない)。そこに **pgvector** と **PGroonga** を明示 install/build。PGroonga は apache-arrow apt source + groonga apt source → `postgresql-15-pgdg-pgroonga` + `groonga-tokenizer-mecab` + `groonga-normalizer-mysql` (pgroonga/docker debian/15 準拠、bookworm supported)。compose の `image: ankane/pgvector:latest` を `build:` に差替。
+- **公式 pgroonga image (`postgres:15-trixie`) は使わない**: trixie = Debian 13 / glibc 2.41 で現データ (bookworm / glibc 2.36, pgdg120) と glibc が変わる。
+- **collation は「無変化」と断定しない (Codex High①)**: bookworm 維持で**変更リスクを下げる**が、minor 差分や collation version mismatch はあり得る。→ 差替前後で必ず比較:
+  - `SELECT version(); SHOW server_version;`
+  - `SELECT collname, collversion, pg_collation_actual_version(oid) FROM pg_collation WHERE collversion IS DISTINCT FROM pg_collation_actual_version(oid);`
+  - `SELECT extname, extversion FROM pg_extension;`
+  - **mismatch があれば該当 index を REINDEX** (「REINDEX 不要」とは書かない)。
+- **PG メジャー 15 厳守**: data dir 互換、dump/restore 不要。
+- **pgvector UPDATE は分離 (Codex High②)**: `ALTER EXTENSION vector UPDATE` は PGroonga 導入と分け、**初回差替では必要が無ければ実行しない** (rollback 境界を単純に保つ。現 0.5.1 のままで vector データは動く)。
+
+#### バックアップ (Codex High③、`pg_dump` だけでは弱い)
+image 差替の前に**全部**取る:
+1. `pg_dump -Fc` (論理) + `pg_dumpall --globals-only` (roles/globals)
+2. **停止中の volume snapshot** (物理、`postgres_data`)
+3. dump を**別 container/別 volume に `pg_restore --clean --if-exists` で復元検証** (「取れたつもり」を防ぐ)
+
+#### 2 段ロールバック (Codex High②、境界を区切る)
+- **migration 前 rollback**: extension update / PGroonga migration を**まだ実行していない**なら、旧 `ankane/pgvector:latest` に image を戻すだけで可。
+- **migration 後 rollback**: `CREATE EXTENSION pgroonga` / PGroonga index / (実行したら) vector UPDATE の**後**は、旧 image に PGroonga の .so が無く catalog に理解できない object が残るため**旧 image 戻しは不可**。→ **volume snapshot restore か検証済み dump restore のみが正式 rollback**。
+- **rollback 完了条件 = 「旧 container が起動」ではなく「migration 前の smoke test が通る」**。
+
+#### build / 起動 smoke test (Codex Low)
+- build step で `apt-cache policy postgresql-15-pgdg-pgroonga groonga-tokenizer-mecab` を確認、digest/package version をログに残す。
+- 起動後: 既存 DB は `vector` 導入済なので `SELECT extversion FROM pg_extension WHERE extname='vector'` で確認 (+ 必要なら `CREATE EXTENSION IF NOT EXISTS vector;`) → `CREATE EXTENSION IF NOT EXISTS pgroonga;` → tokenizer 指定 index 作成 → `pgroonga_score` を含む検索 → **既存 vector query が無傷** を確認。
+
+#### 将来
+- この image で記憶システム §I1 (日本語 lexical) も PGroonga で正式修正可能 (再利用)。
