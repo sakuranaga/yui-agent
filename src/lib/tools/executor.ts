@@ -12,7 +12,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ToolDef, ToolContext } from "./types";
 import { toAnthropicTools } from "./runtime";
-import { dispatchTool, type DispatchLedger, type DispatchOutcome } from "./dispatch";
+import { dispatchTool, stableStringify, type DispatchLedger, type DispatchOutcome } from "./dispatch";
 
 /** mini-loop の反復上限 (= 現状 chat ループの MAX_ITER 相当)。global budget/depth とは別の per-loop キャップ。 */
 export const DEFAULT_MAX_TOOL_ITER = 8;
@@ -23,6 +23,17 @@ export type ExecutorComplete = (args: {
   messages: Anthropic.MessageParam[];
   tools: Anthropic.Tool[];
 }) => Promise<Anthropic.Message>;
+
+/**
+ * registry ToolDef でない tool (specialist umbrella 等) の実行ハンドラ (docs §5.4.1)。
+ * route が既存 judge + dispatchSpecialistJob へ橋渡しする。DispatchOutcome を返す
+ * (specialist 成功は executed/silent、judge skip は skipped、dispatch 失敗は failed 等、§5.4.2)。
+ */
+export type ExtraToolHandler = (toolUse: {
+  id: string;
+  name: string;
+  input: unknown;
+}) => Promise<DispatchOutcome>;
 
 export type ExecutorOutcome = {
   toolName: string;
@@ -113,14 +124,17 @@ function budgetSkipResult(toolUseId: string): Anthropic.ToolResultBlockParam {
   };
 }
 
+function dupSkipResult(toolUseId: string): Anthropic.ToolResultBlockParam {
+  return {
+    type: "tool_result",
+    tool_use_id: toolUseId,
+    content: JSON.stringify({ skipped: true, reason: "duplicate dispatch suppressed" }),
+  };
+}
+
 function unknownKey(name: string, input: unknown): string {
-  let s = "";
-  try {
-    s = JSON.stringify(input) ?? "";
-  } catch {
-    s = "[unserializable]";
-  }
-  return `${name}|${s}`;
+  // dispatchTool と同じ正規化 (キー順非依存・循環安全) で specialist 二重 dispatch を確実に抑止 (Codex P3 Low)。
+  return `${name}|${stableStringify(input)}`;
 }
 
 /**
@@ -140,11 +154,19 @@ export async function runExecutor(opts: {
   ledger: DispatchLedger;
   complete: ExecutorComplete;
   maxIter?: number;
+  /** registry でない tool (specialist umbrella) を Executor の tool 一覧に追加 (§5.4.1)。 */
+  extraTools?: Anthropic.Tool[];
+  /** extraTools の tool_use を処理するハンドラ (route が dispatchSpecialistJob へ橋渡し)。 */
+  onExtraTool?: ExtraToolHandler;
 }): Promise<ExecutorRunResult> {
-  const { userInput, ack, bounded, tools, ctx, ledger, complete } = opts;
+  const { userInput, ack, bounded, tools, ctx, ledger, complete, onExtraTool } = opts;
   const maxIter = opts.maxIter ?? DEFAULT_MAX_TOOL_ITER;
   const toolByName = new Map(tools.map((t) => [t.name, t]));
-  const anthropicTools = toAnthropicTools(tools);
+  // registry 名と衝突する extra tool は除外 (LLM へ同名重複を渡さない、Codex P3 Low)。registry 優先。
+  const safeExtra = (opts.extraTools ?? []).filter((t) => !toolByName.has(t.name));
+  const extraNames = new Set(safeExtra.map((t) => t.name));
+  const anthropicTools = [...toAnthropicTools(tools), ...safeExtra];
+  const seenExtra = new Set<string>(); // extra tool (specialist) の二重 dispatch 抑止
 
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: buildExecutorUserText(userInput, ack, bounded) },
@@ -172,6 +194,51 @@ export async function runExecutor(opts: {
     for (const tu of toolUses) {
       const tool = toolByName.get(tu.name);
       if (!tool) {
+        // specialist umbrella (extra tool) → onExtraTool で既存 dispatchSpecialistJob へ橋渡し (§5.4.1)。
+        if (onExtraTool && extraNames.has(tu.name)) {
+          if (ledger.budgetRemaining <= 0) {
+            const res = budgetSkipResult(tu.id);
+            toolResults.push(res);
+            outcomes.push({ toolName: tu.name, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "budget" } });
+            budgetHit = true;
+            continue;
+          }
+          // 二重 dispatch 抑止: specialist は background job なので同一 (name,input) の重複投入を防ぐ (Codex P3 High)。
+          const ek = unknownKey(tu.name, tu.input);
+          if (seenExtra.has(ek)) {
+            const res = dupSkipResult(tu.id);
+            toolResults.push(res);
+            outcomes.push({ toolName: tu.name, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "duplicate" } });
+            continue;
+          }
+          ledger.budgetRemaining--;
+          seenExtra.add(ek); // 実行前予約
+          let outcome: DispatchOutcome;
+          try {
+            outcome = await onExtraTool({ id: tu.id, name: tu.name, input: tu.input });
+          } catch (e) {
+            // onExtraTool の例外で route 全体を落とさない (失敗は必ず可視化、Codex P3 Medium)。
+            outcome = {
+              executionState: "failed",
+              disposition: "report",
+              result: {
+                type: "tool_result",
+                tool_use_id: tu.id,
+                content: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+                is_error: true,
+              },
+            };
+          }
+          if (outcome.executionState === "failed" || outcome.executionState === "skipped") {
+            seenExtra.delete(ek); // 失敗/skip は再試行可
+          }
+          outcomes.push({ toolName: tu.name, outcome });
+          toolResults.push(outcome.result);
+          if (outcome.executionState !== "skipped") anyProgress = true;
+          if (outcome.executionState === "pending_confirmation") anyPending = true;
+          if (outcome.skipReason === "budget") budgetHit = true;
+          continue;
+        }
         // unknown も budget を 1 消費する (同一応答内の大量 tool_calls バイパス防止、Codex P2b Medium)。
         if (ledger.budgetRemaining <= 0) {
           const res = budgetSkipResult(tu.id);

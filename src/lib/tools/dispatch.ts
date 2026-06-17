@@ -54,7 +54,7 @@ export function createDispatchLedger(opts?: { budget?: number; maxDepth?: number
  *   - undefined は null と区別 ("undefined")。
  *   - bigint/function/symbol 等 JSON 化不能な primitive は型名に丸める。
  */
-function stableStringify(v: unknown, seen: WeakSet<object> = new WeakSet()): string {
+export function stableStringify(v: unknown, seen: WeakSet<object> = new WeakSet()): string {
   if (v === undefined) return "undefined";
   if (v === null) return "null";
   if (typeof v !== "object") {

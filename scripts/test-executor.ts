@@ -262,6 +262,98 @@ async function main() {
     check(r.iterations === 2, `同一 unknown 反復の iterations が 2 でない (${r.iterations})`);
   }
 
+  // 13. specialist umbrella (extra tool) → onExtraTool 橋渡し (§5.4.1)
+  {
+    const ledger = createDispatchLedger();
+    const specialistTool = { name: "ask_mail_specialist", description: "メール", input_schema: { type: "object", properties: { query: { type: "string" } } } } as unknown as Anthropic.Tool;
+    let bridged: { id: string; name: string; input: unknown } | null = null;
+    const onExtraTool = async (tu: { id: string; name: string; input: unknown }) => {
+      bridged = tu;
+      return { executionState: "executed" as const, disposition: "silent" as const, result: { type: "tool_result" as const, tool_use_id: tu.id, content: JSON.stringify({ dispatched: true }) } };
+    };
+    const r = await runExecutor({
+      userInput: "未読メール教えて",
+      ack: "メール確認しますね",
+      tools: [],
+      ctx,
+      ledger,
+      complete: scripted([msg([toolUse("ask_mail_specialist", { query: "未読" }, "s1")]), msg([textBlock("")])]),
+      extraTools: [specialistTool],
+      onExtraTool,
+    });
+    check(bridged !== null && (bridged as { name: string }).name === "ask_mail_specialist", "specialist が onExtraTool へ橋渡しされない");
+    check(r.outcomes[0]?.outcome.executionState === "executed", "specialist outcome が executed でない");
+    check(r.outcomes[0]?.outcome.disposition === "silent", "specialist 成功が silent でない (C 二重起動防止)");
+  }
+
+  // 14. extra tool を渡しても onExtraTool 無しなら unknown 扱い
+  {
+    const ledger = createDispatchLedger();
+    const specialistTool = { name: "ask_mail_specialist", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
+    const r = await runExecutor({
+      userInput: "x", ack: "y", tools: [], ctx, ledger,
+      complete: scripted([msg([toolUse("ask_mail_specialist", {}, "s")]), msg([textBlock("")])]),
+      extraTools: [specialistTool], // onExtraTool 無し
+    });
+    check(r.outcomes[0]?.outcome.executionState === "failed", "onExtraTool 無しで extra tool が failed(unknown) にならない");
+  }
+
+  // 15. 同一 specialist の二重 dispatch 抑止 (Codex P3 High)
+  {
+    const ledger = createDispatchLedger();
+    const specialistTool = { name: "ask_mail_specialist", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
+    let calls = 0;
+    const onExtraTool = async (tu: { id: string; name: string; input: unknown }) => {
+      calls++;
+      return { executionState: "executed" as const, disposition: "silent" as const, result: { type: "tool_result" as const, tool_use_id: tu.id, content: "{}" } };
+    };
+    // 毎 iter 同じ specialist call を返す
+    const complete: ExecutorComplete = async () => msg([toolUse("ask_mail_specialist", { q: "同じ" }, "s")]);
+    const r = await runExecutor({ userInput: "x", ack: "y", tools: [], ctx, ledger, complete, extraTools: [specialistTool], onExtraTool, maxIter: 8 });
+    check(calls === 1, `specialist が ${calls} 回 dispatch された (1 のはず=二重抑止)`);
+    check(r.stopReason === "no_progress", `specialist 重複が no_progress で止まらない (${r.stopReason})`);
+  }
+
+  // 16. onExtraTool の例外 → failed に落として route を落とさない (Codex P3 Medium)
+  {
+    const ledger = createDispatchLedger();
+    const specialistTool = { name: "ask_mail_specialist", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
+    const onExtraTool = async () => { throw new Error("dispatch 失敗"); };
+    let threw = false;
+    let state = "";
+    try {
+      const r = await runExecutor({ userInput: "x", ack: "y", tools: [], ctx, ledger, complete: scripted([msg([toolUse("ask_mail_specialist", {}, "s")]), msg([textBlock("")])]), extraTools: [specialistTool], onExtraTool });
+      state = r.outcomes[0]?.outcome.executionState ?? "";
+    } catch { threw = true; }
+    check(!threw, "onExtraTool の例外で runExecutor が reject した (route 全体が落ちる)");
+    check(state === "failed", `onExtraTool 例外が failed にならない (${state})`);
+  }
+
+  // 17. extra tool が registry 名と衝突 → registry (dispatchTool) 優先、onExtraTool 呼ばれない
+  {
+    const ledger = createDispatchLedger();
+    const collide = { name: "add_todo", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
+    let extraCalled = false;
+    const onExtraTool = async (tu: { id: string; name: string; input: unknown }) => { extraCalled = true; return { executionState: "executed" as const, disposition: "silent" as const, result: { type: "tool_result" as const, tool_use_id: tu.id, content: "{}" } }; };
+    const r = await runExecutor({ userInput: "x", ack: "y", tools: [addTodo], ctx, ledger, complete: scripted([msg([toolUse("add_todo", { title: "z" }, "a")]), msg([textBlock("")])]), extraTools: [collide], onExtraTool });
+    check(extraCalled === false, "registry 名衝突で onExtraTool が呼ばれた (registry 優先のはず)");
+    check(r.outcomes[0]?.outcome.executionState === "executed", "衝突時に registry tool が実行されない");
+  }
+
+  // 18. specialist 二重抑止は key 順非依存 (Codex P3 Low: stableStringify 共有)
+  {
+    const ledger = createDispatchLedger();
+    const specialistTool = { name: "ask_mail_specialist", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
+    let calls = 0;
+    const onExtraTool = async (tu: { id: string; name: string; input: unknown }) => { calls++; return { executionState: "executed" as const, disposition: "silent" as const, result: { type: "tool_result" as const, tool_use_id: tu.id, content: "{}" } }; };
+    let n = 0;
+    const inputs = [{ a: 1, b: 2 }, { b: 2, a: 1 }]; // 同内容・キー順違い
+    const complete: ExecutorComplete = async () => msg([toolUse("ask_mail_specialist", inputs[n++] ?? {}, "s")]);
+    const r = await runExecutor({ userInput: "x", ack: "y", tools: [], ctx, ledger, complete, extraTools: [specialistTool], onExtraTool, maxIter: 8 });
+    check(calls === 1, `key 順違いの同一 specialist が ${calls} 回 dispatch された (1 のはず)`);
+    check(r.stopReason === "no_progress", "key 順違い重複が no_progress で止まらない");
+  }
+
   console.log(`\n=== 結果: ${pass} pass / ${fail} fail ===`);
   process.exit(fail === 0 ? 0 : 1);
 }
