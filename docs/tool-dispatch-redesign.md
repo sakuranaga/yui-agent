@@ -518,37 +518,64 @@ Executor は **1 種の標準リクエスト**を投げ、返りの**エンコ�
 4. **ツール検索** = 候補 = `floor(≤6 具体名) ∪ vectorTopK ∪ dependentReads` / 例文中心+description 保険・kind 別重み / **dense + PGroonga lexical ハイブリッド (日本語 lexical を正しく対応、RRF 融合、stale 時は lexical-only に段階 fallback)** / **multi-tool recall (`all_required_in_candidates`) + no-op 時 retrieval fallback** (§12.2)。
 5. **出力** = canonical `{toolCalls,text,finishReason,raw}` → Native/JSON/XML/TEXT/**ERROR** の 5 分類、**痕跡条件列挙で TEXT≠Parse ERROR を明確化・mixed/refusal 対応・repair 1 回**、normalizer は **provider 共通境界**に集約 (§12.3)。
 6. **index スキーマ** = 元テキスト + `embedding_model` + `embedding_dimensions` + `index_version` 保持。**stale/次元不一致は lexical-only fallback (lexical 不可なら full permitted catalog) + background reindex、再構築は version 切替で atomic** (§12.4)。
-7. **インフラ** = PGroonga + pgvector 同居のカスタム image (PG15/bookworm 維持で collation 変更リスク低減・mismatch なら REINDEX)。**image 差替は dump+globals+volume snapshot → 復元検証 → 2 段 rollback (migration 前=image 戻し / 後=snapshot restore) の不可逆操作プロトコル必須** (§12.6)。
+7. **インフラ** = **PG15→PG18 メジャー移行** + PGroonga/pgvector 同居カスタム image + **フル装備の upgrade script/manual**。**logical dump/restore で新 PG18(新 volume)、旧 PG15 volume 温存。write-freeze → globals 先 restore → `pg_restore --exit-on-error` → 多項目検証 (行数/checksum/sequence/large object/invalid index/拡張) → cutover。rollback は cutover 前=損失なし / 後=データ損失**。fresh initdb で in-place collation mismatch は回避 (index 全再構築)。不可逆操作プロトコル §12.6。
 
-### 12.6 インフラ: PGroonga + pgvector 同居 image (案A 採用、日本語 lexical 本命)
+### 12.6 インフラ: PG15→PG18 メジャー移行 + PGroonga/pgvector 同居 image (案A、日本語 lexical 本命)
 
-日本語 lexical を PGroonga で実現するため、Postgres image に PGroonga と pgvector を同居させる。**本番データ (記憶・ノート・OAuth トークン) が入ったボリュームを触る不可逆操作**なので、下記プロトコルを厳守。
+現状は **PG15.4 + pgvector 0.5.1**（古い非推奨 `ankane/pgvector:latest` に固定）。image を作り直す好機なので、**この機に PG18 へメジャーアップグレード**し、同 image に PGroonga と pgvector を同居させる。**本番データ (記憶・ノート・OAuth トークン) を移行する不可逆操作**なので下記を厳守。
+
+> 実機確認 (2026-06-17): pgroonga `debian/18` = `FROM postgres:18-trixie` + `postgresql-18-pgdg-pgroonga`、`pgvector/pgvector:pg18` 公式タグあり、`postgres:18` digest `sha256:29ee7bb3…`。両拡張とも PG18 対応済。
+
+#### 方式: in-place 拡張追加ではなく dump/restore メジャー移行
+- **PG15 → PG18 は data dir 非互換** (PG18 は PG15 の data dir で起動しない) → **logical dump/restore で移行** (`pg_upgrade` は両バイナリ同居が要るので Docker では dump/restore が素直)。
+- **新 PG18 は新規ボリューム** (`postgres_data_pg18` 等) に fresh initdb。**旧 PG15 ボリューム (`postgres_data`) は一切触らず温存** → これが**最強の rollback** (compose を旧 image+旧 volume に戻すだけ)。
+- **fresh initdb + restore なので in-place の glibc collation mismatch 由来の既存 index 破損リスクは避けられる** (Codex Low: 「問題が消える」は言い過ぎ — 新 collation で全 index を再構築するため、unique 衝突や sort order 差分は restore/app smoke で検出する)。テキストは logical dump で忠実に移送。PG18 は trixie ベースで可。
 
 #### image
-- **base は `FROM postgres:15-bookworm` を digest pin して明示** (Codex High①: `pgvector/pgvector:pg15` の Debian base は tag mutable で bookworm 保証にならない)。そこに **pgvector** と **PGroonga** を明示 install/build。PGroonga は apache-arrow apt source + groonga apt source → `postgresql-15-pgdg-pgroonga` + `groonga-tokenizer-mecab` + `groonga-normalizer-mysql` (pgroonga/docker debian/15 準拠、bookworm supported)。compose の `image: ankane/pgvector:latest` を `build:` に差替。
-- **公式 pgroonga image (`postgres:15-trixie`) は使わない**: trixie = Debian 13 / glibc 2.41 で現データ (bookworm / glibc 2.36, pgdg120) と glibc が変わる。
-- **collation は「無変化」と断定しない (Codex High①)**: bookworm 維持で**変更リスクを下げる**が、minor 差分や collation version mismatch はあり得る。→ 差替前後で必ず比較:
-  - `SELECT version(); SHOW server_version;`
-  - `SELECT collname, collversion, pg_collation_actual_version(oid) FROM pg_collation WHERE collversion IS DISTINCT FROM pg_collation_actual_version(oid);`
-  - `SELECT extname, extversion FROM pg_extension;`
-  - **mismatch があれば該当 index を REINDEX** (「REINDEX 不要」とは書かない)。
-- **PG メジャー 15 厳守**: data dir 互換、dump/restore 不要。
-- **pgvector UPDATE は分離 (Codex High②)**: `ALTER EXTENSION vector UPDATE` は PGroonga 導入と分け、**初回差替では必要が無ければ実行しない** (rollback 境界を単純に保つ。現 0.5.1 のままで vector データは動く)。
+- **base = `pgvector/pgvector:pg18` を digest pin** (公式 pgvector + PG18) に **PGroonga apt を追加** (pgroonga/docker debian/18 準拠: apache-arrow + groonga apt source → `postgresql-18-pgdg-pgroonga` + `groonga-tokenizer-mecab` + `groonga-normalizer-mysql`)。codename は `lsb_release` で自動追従。
+  - build step で `apt-cache policy postgresql-18-pgdg-pgroonga groonga-tokenizer-mecab` を確認し、可用性が無ければ `FROM postgres:18-trixie` + 両拡張明示にフォールバック (Codex High①: tag mutable 回避で digest pin、版は build ログに残す)。
+- compose の `image: ankane/pgvector:latest` (+ `postgres_data`) を **`build:` + 新 volume `postgres_data_pg18`** に差替。
 
-#### バックアップ (Codex High③、`pg_dump` だけでは弱い)
-image 差替の前に**全部**取る:
-1. `pg_dump -Fc` (論理) + `pg_dumpall --globals-only` (roles/globals)
-2. **停止中の volume snapshot** (物理、`postgres_data`)
-3. dump を**別 container/別 volume に `pg_restore --clean --if-exists` で復元検証** (「取れたつもり」を防ぐ)
+#### 移行手順 (不可逆操作プロトコル、PRIME DIRECTIVE)
+0. **前提チェック**: 現 PG version (15)、disk 空き (dump サイズ)、PostgreSQL **16/17/18 release notes の breaking changes 確認** (拡張・認証・設定パラメータ・予約語・planner、Codex Low)。**dump/restore は PG18 client を使う** — 旧 PG15 server へ PG18 client で接続して dump、`pg_dump`/`pg_restore --version` を log に残す (Codex Medium)。
+1. **dry-run 移行 (online 可)**: アプリ稼働のまま dump→restore→検証を一度通し、手順と所要時間を把握。
+2. **write-freeze して final backup (Codex High①、必須)**: cutover 用 final dump の前に **web/worker/discord/cron を停止** (= 書き込み禁止)。**dump 後〜cutover の旧 DB 書き込みは新 DB に乗らない (write loss)** ので freeze 必須。`pg_dump -Fc` (per-db) + `pg_dumpall --globals-only` + 旧 volume **停止中 snapshot**。
+3. **新 PG18 (custom image, 新 volume) 起動 → restore**:
+   - **globals を先に restore** (`psql -f globals.sql`) — roles/ACL/owner が DB restore の前提 (Codex High③)。`POSTGRES_USER=vroid` と衝突する場合の扱いも script で決める。
+   - **`pg_restore --exit-on-error --verbose`** (小規模なら `--single-transaction`、並列なら `--jobs N` + restore log の error/warning **0 件**を fail 条件に、Codex High②)。dump が `CREATE EXTENSION vector` を含むので pgvector は新版に fresh 作成 (旧 0.5.1 → 新版、vector 列は logical 移送で互換)。
+   - migration で `CREATE EXTENSION pgroonga` + tool_index。
+4. **cutover 前に検証 (行数だけでは弱い、Codex Medium)** — ここを通るまでアプリを新 DB に向けない:
+   - 全 user table の **row count 一致** + 主要テーブルの **checksum/sample hash 一致**
+   - **sequence**: `last_value >= max(id)`
+   - **large object**: `count(*) FROM pg_largeobject_metadata` 一致 (dump は filter 無しの全体、filter 時は `--large-objects` 明示)
+   - **invalid index なし**: `pg_index.indisvalid=false` がゼロ (HNSW 含む)
+   - `SELECT extname, extversion FROM pg_extension;` で vector + pgroonga
+   - **既存クエリ (notes/memory 検索) 無傷** + app の主要 read/write smoke
+5. **cutover**: 検証 OK で初めて compose を新 PG18 (新 volume) に向け、アプリ再開。
+6. **rollback (Codex Medium、境界を明記)**:
+   - **cutover 前**: 新 volume を捨て旧 image+旧 volume に戻すだけ — **旧データ無傷・損失なし**。
+   - **cutover 後**: 新 PG18 に入った書き込みは旧 PG15 に**無い** → 旧構成復帰は **データ損失を伴う** (OAuth token / 会話記憶が絡むので軽くない)。rollback 前に可能なら **新 PG18 の emergency dump** を取る。cutover 直後の検証 window は短く・低書き込み運用。
+7. **旧 volume の破棄は、新 DB で数日運用して確信を得てから** (数日後の rollback は差分移植なしには不可、という境界も承知の上で)。
 
-#### 2 段ロールバック (Codex High②、境界を区切る)
-- **migration 前 rollback**: extension update / PGroonga migration を**まだ実行していない**なら、旧 `ankane/pgvector:latest` に image を戻すだけで可。
-- **migration 後 rollback**: `CREATE EXTENSION pgroonga` / PGroonga index / (実行したら) vector UPDATE の**後**は、旧 image に PGroonga の .so が無く catalog に理解できない object が残るため**旧 image 戻しは不可**。→ **volume snapshot restore か検証済み dump restore のみが正式 rollback**。
-- **rollback 完了条件 = 「旧 container が起動」ではなく「migration 前の smoke test が通る」**。
+#### pgvector/HNSW 復元の前提 (Codex Medium)
+- restore 前に空 DB で `CREATE EXTENSION vector; CREATE TABLE t(v vector(3)); CREATE INDEX ON t USING hnsw (v vector_cosine_ops);` が通ることを確認 (新 image に opclass がある)。
+- HNSW index は logical restore の post-data で**再構築**される → 時間がかかる & 失敗検知が重要。restore 後に **index が valid** (上記検証) を確認、失敗なら **cutover 禁止**。
 
 #### build / 起動 smoke test (Codex Low)
-- build step で `apt-cache policy postgresql-15-pgdg-pgroonga groonga-tokenizer-mecab` を確認、digest/package version をログに残す。
-- 起動後: 既存 DB は `vector` 導入済なので `SELECT extversion FROM pg_extension WHERE extname='vector'` で確認 (+ 必要なら `CREATE EXTENSION IF NOT EXISTS vector;`) → `CREATE EXTENSION IF NOT EXISTS pgroonga;` → tokenizer 指定 index 作成 → `pgroonga_score` を含む検索 → **既存 vector query が無傷** を確認。
+- 起動後: `SELECT extversion FROM pg_extension WHERE extname='vector'` で確認 → `CREATE EXTENSION IF NOT EXISTS pgroonga;` → tokenizer 指定 index 作成 → `pgroonga_score` を含む検索 → restore したデータで既存 vector query が無傷。digest/package version は build ログに残す。
+
+#### アップグレード script + manual (フル装備、ご主人様指示)
+PG18+PGroonga 化は**データを壊す不可逆操作**。**既存ユーザーが各自の PG15 デプロイを安全に移行できる完全な tooling を妥協なくフル装備で用意**する (我々自身の移行にも使う)。外部 clone は現状ほぼ無いが、安全 deliverable として手を抜かない。
+
+- **`scripts/upgrade-pg18.sh`** (安全既定・冪等・abort-safe・**失敗時は必ず旧構成が生きる**): 上記移行手順 0〜7 を codify —
+  - 前提チェック (PG15 検出・disk・release notes 喚起) + **PG18 client version を log**
+  - **write-freeze** (app 停止) を強制 (skip 時は明示警告)
+  - `pg_dump -Fc` + `pg_dumpall --globals-only` + 停止中 snapshot 促し
+  - **globals 先 restore** → **`pg_restore --exit-on-error`** + restore log の error/warning **0 件確認**
+  - **多項目検証** (行数 + checksum + sequence + large object + invalid index + 拡張)、**不一致なら即 abort + 旧構成温存**
+  - **cutover は `--confirm` のみ** (自動で本番を切り替えない)、**旧 volume は絶対に消さない**
+- **manual** (`docs/upgrade-pg18.md`): 前提・所要時間・**write-freeze 手順**・移行手順・**多項目検証**・**rollback (cutover 前=損失なし / 後=データ損失境界)**・トラブルシュート・「旧 volume 数日温存」。
+- **環境差対応 (フル装備)**: 標準 compose ユーザーは script で完結。**managed PG / 外部 DB ユーザー向けに「write-freeze → PG18 client で pg_dump → PG18+pgvector+pgroonga へ globals 先 restore → 多項目検証 → cutover」手順も併記**。
 
 #### 将来
 - この image で記憶システム §I1 (日本語 lexical) も PGroonga で正式修正可能 (再利用)。
