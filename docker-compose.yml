@@ -147,14 +147,16 @@ services:
       retries: 5
 
   postgres:
-    image: ankane/pgvector:latest
+    image: yui-agent-postgres:pg18
     container_name: yui-agent-postgres
     environment:
       - POSTGRES_USER=vroid
       - POSTGRES_PASSWORD=vroid
       - POSTGRES_DB=vroid
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # PG18 はデータを /var/lib/postgresql 配下の版別サブディレクトリに置く
+      # (docker-library/postgres #1259)。親をマウントする。
+      - postgres_data_pg18:/var/lib/postgresql
     ports:
       # Expose for psql/inspection from host. Bind to localhost so it's not
       # reachable from the LAN. Use 5433 to avoid conflict with a host postgres.
@@ -166,6 +168,7 @@ services:
       retries: 10
 
 volumes:
+  postgres_data_pg18:
   node_modules:
   next_cache:
   postgres_data:
