@@ -7,7 +7,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ToolDef, ToolContext, ToolSurface } from "@/lib/tools/types";
 import { createDispatchLedger } from "@/lib/tools/dispatch";
-import { runExecutor, type ExecutorComplete } from "@/lib/tools/executor";
+import { runExecutor, aggregateForReport, type ExecutorComplete, type ExecutorOutcome } from "@/lib/tools/executor";
 
 let pass = 0;
 let fail = 0;
@@ -75,8 +75,7 @@ async function main() {
   {
     const ledger = createDispatchLedger();
     const r = await runExecutor({
-      userInput: "元気？",
-      ack: "元気だよ、ありがとう",
+      recentHistory: [{ role: "user", content: "元気？" }],
       tools: [addTodo, listTodos],
       ctx,
       ledger,
@@ -91,8 +90,7 @@ async function main() {
   {
     const ledger = createDispatchLedger();
     const r = await runExecutor({
-      userInput: "牛乳買うのメモして",
-      ack: "牛乳のTODO、追加しますね",
+      recentHistory: [{ role: "user", content: "牛乳買うのメモして" }],
       tools: [addTodo],
       ctx,
       ledger,
@@ -117,8 +115,7 @@ async function main() {
       return msg([textBlock("")]);
     };
     const r = await runExecutor({
-      userInput: "ジムのTODO作って、忘れないようリマインダーも",
-      ack: "ジムのTODOとリマインダー、用意しますね",
+      recentHistory: [{ role: "user", content: "ジムのTODO作って、忘れないようリマインダーも" }],
       tools: [addTodo, addReminder],
       ctx,
       ledger,
@@ -136,8 +133,7 @@ async function main() {
     let n = 0;
     const complete: ExecutorComplete = async () => msg([toolUse("list_todos", { n: n++ }, `id${n}`)]);
     const r = await runExecutor({
-      userInput: "x",
-      ack: "y",
+      recentHistory: [{ role: "user", content: "x" }],
       tools: [listTodos],
       ctx,
       ledger,
@@ -153,8 +149,7 @@ async function main() {
     const ledger = createDispatchLedger();
     const complete: ExecutorComplete = async () => msg([toolUse("add_todo", { title: "同じ" }, "dup")]);
     const r = await runExecutor({
-      userInput: "x",
-      ack: "y",
+      recentHistory: [{ role: "user", content: "x" }],
       tools: [addTodo],
       ctx,
       ledger,
@@ -172,8 +167,7 @@ async function main() {
   {
     const ledger = createDispatchLedger();
     const r = await runExecutor({
-      userInput: "x",
-      ack: "y",
+      recentHistory: [{ role: "user", content: "x" }],
       tools: [addTodo],
       ctx,
       ledger,
@@ -188,7 +182,7 @@ async function main() {
     const ledger = createDispatchLedger({ budget: 1 });
     let n = 0;
     const complete: ExecutorComplete = async () => msg([toolUse("list_todos", { n: n++ }, `b${n}`)]);
-    const r = await runExecutor({ userInput: "x", ack: "y", tools: [listTodos], ctx, ledger, complete, maxIter: 8 });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [listTodos], ctx, ledger, complete, maxIter: 8 });
     check(r.stopReason === "budget", `budget で止まらない (${r.stopReason})`);
   }
 
@@ -196,8 +190,7 @@ async function main() {
   {
     const ledger = createDispatchLedger();
     const r = await runExecutor({
-      userInput: "TODO見せて",
-      ack: "確認しますね",
+      recentHistory: [{ role: "user", content: "TODO見せて" }],
       tools: [listTodos],
       ctx,
       ledger,
@@ -217,7 +210,7 @@ async function main() {
       calls++;
       return msg([toolUse("del_thing", { id: "x" }, "d1")]);
     };
-    const r = await runExecutor({ userInput: "消して", ack: "削除しますね", tools: [confirmTool], ctx: pendingCtx, ledger, complete, maxIter: 8 });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "消して" }], tools: [confirmTool], ctx: pendingCtx, ledger, complete, maxIter: 8 });
     check(r.stopReason === "pending_confirmation", `pending で止まらない (${r.stopReason})`);
     check(r.outcomes[0]?.outcome.executionState === "pending_confirmation", "confirm tool が pending_confirmation でない");
     check(calls === 1, `pending 後も LLM を再呼び出しした (${calls} 回)`);
@@ -238,7 +231,7 @@ async function main() {
       flag.leaked = turn.includes("LEAK_MARKER");
       return msg([textBlock("")]);
     };
-    await runExecutor({ userInput: "x", ack: "y", tools: [listTodos], ctx, ledger, complete });
+    await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [listTodos], ctx, ledger, complete });
     check(flag.iter2Ran && !flag.leaked, "Executor の text 本文が履歴に漏れている (模倣汚染)");
   }
 
@@ -247,7 +240,7 @@ async function main() {
     const ledger = createDispatchLedger({ budget: 2 });
     const complete: ExecutorComplete = async () =>
       msg([toolUse("u1", {}, "x1"), toolUse("u2", {}, "x2"), toolUse("u3", {}, "x3")]);
-    const r = await runExecutor({ userInput: "x", ack: "y", tools: [addTodo], ctx, ledger, complete, maxIter: 2 });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [addTodo], ctx, ledger, complete, maxIter: 2 });
     const skippedBudget = r.outcomes.filter((o) => o.outcome.skipReason === "budget").length;
     check(skippedBudget >= 1, "unknown tool が budget を消費していない (3件目が skip されるべき)");
     check(r.stopReason === "budget", `unknown 大量で budget 停止しない (${r.stopReason})`);
@@ -257,7 +250,7 @@ async function main() {
   {
     const ledger = createDispatchLedger({ budget: 100 });
     const complete: ExecutorComplete = async () => msg([toolUse("same_unknown", { a: 1 }, "u")]);
-    const r = await runExecutor({ userInput: "x", ack: "y", tools: [addTodo], ctx, ledger, complete, maxIter: 8 });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [addTodo], ctx, ledger, complete, maxIter: 8 });
     check(r.stopReason === "no_progress", `同一 unknown 反復が no_progress で止まらない (${r.stopReason})`);
     check(r.iterations === 2, `同一 unknown 反復の iterations が 2 でない (${r.iterations})`);
   }
@@ -272,8 +265,7 @@ async function main() {
       return { executionState: "executed" as const, disposition: "silent" as const, result: { type: "tool_result" as const, tool_use_id: tu.id, content: JSON.stringify({ dispatched: true }) } };
     };
     const r = await runExecutor({
-      userInput: "未読メール教えて",
-      ack: "メール確認しますね",
+      recentHistory: [{ role: "user", content: "未読メール教えて" }],
       tools: [],
       ctx,
       ledger,
@@ -291,7 +283,7 @@ async function main() {
     const ledger = createDispatchLedger();
     const specialistTool = { name: "ask_mail_specialist", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
     const r = await runExecutor({
-      userInput: "x", ack: "y", tools: [], ctx, ledger,
+      recentHistory: [{ role: "user", content: "x" }], tools: [], ctx, ledger,
       complete: scripted([msg([toolUse("ask_mail_specialist", {}, "s")]), msg([textBlock("")])]),
       extraTools: [specialistTool], // onExtraTool 無し
     });
@@ -309,7 +301,7 @@ async function main() {
     };
     // 毎 iter 同じ specialist call を返す
     const complete: ExecutorComplete = async () => msg([toolUse("ask_mail_specialist", { q: "同じ" }, "s")]);
-    const r = await runExecutor({ userInput: "x", ack: "y", tools: [], ctx, ledger, complete, extraTools: [specialistTool], onExtraTool, maxIter: 8 });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [], ctx, ledger, complete, extraTools: [specialistTool], onExtraTool, maxIter: 8 });
     check(calls === 1, `specialist が ${calls} 回 dispatch された (1 のはず=二重抑止)`);
     check(r.stopReason === "no_progress", `specialist 重複が no_progress で止まらない (${r.stopReason})`);
   }
@@ -322,7 +314,7 @@ async function main() {
     let threw = false;
     let state = "";
     try {
-      const r = await runExecutor({ userInput: "x", ack: "y", tools: [], ctx, ledger, complete: scripted([msg([toolUse("ask_mail_specialist", {}, "s")]), msg([textBlock("")])]), extraTools: [specialistTool], onExtraTool });
+      const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [], ctx, ledger, complete: scripted([msg([toolUse("ask_mail_specialist", {}, "s")]), msg([textBlock("")])]), extraTools: [specialistTool], onExtraTool });
       state = r.outcomes[0]?.outcome.executionState ?? "";
     } catch { threw = true; }
     check(!threw, "onExtraTool の例外で runExecutor が reject した (route 全体が落ちる)");
@@ -335,7 +327,7 @@ async function main() {
     const collide = { name: "add_todo", description: "", input_schema: { type: "object", properties: {} } } as unknown as Anthropic.Tool;
     let extraCalled = false;
     const onExtraTool = async (tu: { id: string; name: string; input: unknown }) => { extraCalled = true; return { executionState: "executed" as const, disposition: "silent" as const, result: { type: "tool_result" as const, tool_use_id: tu.id, content: "{}" } }; };
-    const r = await runExecutor({ userInput: "x", ack: "y", tools: [addTodo], ctx, ledger, complete: scripted([msg([toolUse("add_todo", { title: "z" }, "a")]), msg([textBlock("")])]), extraTools: [collide], onExtraTool });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [addTodo], ctx, ledger, complete: scripted([msg([toolUse("add_todo", { title: "z" }, "a")]), msg([textBlock("")])]), extraTools: [collide], onExtraTool });
     check(extraCalled === false, "registry 名衝突で onExtraTool が呼ばれた (registry 優先のはず)");
     check(r.outcomes[0]?.outcome.executionState === "executed", "衝突時に registry tool が実行されない");
   }
@@ -349,9 +341,50 @@ async function main() {
     let n = 0;
     const inputs = [{ a: 1, b: 2 }, { b: 2, a: 1 }]; // 同内容・キー順違い
     const complete: ExecutorComplete = async () => msg([toolUse("ask_mail_specialist", inputs[n++] ?? {}, "s")]);
-    const r = await runExecutor({ userInput: "x", ack: "y", tools: [], ctx, ledger, complete, extraTools: [specialistTool], onExtraTool, maxIter: 8 });
+    const r = await runExecutor({ recentHistory: [{ role: "user", content: "x" }], tools: [], ctx, ledger, complete, extraTools: [specialistTool], onExtraTool, maxIter: 8 });
     check(calls === 1, `key 順違いの同一 specialist が ${calls} 回 dispatch された (1 のはず)`);
     check(r.stopReason === "no_progress", "key 順違い重複が no_progress で止まらない");
+  }
+
+  // 19. aggregateForReport: silent 除外 / report 含む / 失敗・pending 含む / 打ち切り通知
+  {
+    const mk = (toolName: string, executionState: ExecutorOutcome["outcome"]["executionState"], disposition: "silent" | "report", content = "{}", skipReason?: "budget" | "depth" | "duplicate"): ExecutorOutcome =>
+      ({ toolName, outcome: { executionState, disposition, result: { type: "tool_result", tool_use_id: "x", content }, skipReason } });
+
+    // silent 成功のみ → needsC false
+    const a1 = aggregateForReport([mk("add_todo", "executed", "silent")], "no_tool_calls");
+    check(a1.needsC === false, "silent 成功のみで needsC が true");
+
+    // report 成功 → 含む
+    const a2 = aggregateForReport([mk("list_todos", "executed", "report", '{"todos":["牛乳"]}')], "no_tool_calls");
+    check(a2.needsC === true && a2.text.includes("list_todos"), "report 成功が C に含まれない");
+
+    // 失敗 → 含む
+    const a3 = aggregateForReport([mk("add_todo", "failed", "silent", '{"error":"x"}')], "no_tool_calls");
+    check(a3.needsC === true && a3.text.includes("失敗"), "失敗が C に含まれない");
+
+    // silent 成功 + budget 打ち切り → 通知で needsC true
+    const a4 = aggregateForReport([mk("add_todo", "executed", "silent"), mk("add_todo", "skipped", "silent", "{}", "budget")], "budget");
+    check(a4.needsC === true && a4.text.includes("完了していません"), "打ち切りが C に通知されない");
+  }
+
+  // 20. runtimeFacts が #2 の system に trusted で載る (v3 High②)
+  {
+    const ledger = createDispatchLedger();
+    let sawFacts = false;
+    const complete: ExecutorComplete = async ({ system }) => {
+      sawFacts = system.includes("現在の状況") && system.includes("FACT_MARKER_2026");
+      return msg([textBlock("")]);
+    };
+    await runExecutor({
+      recentHistory: [{ role: "user", content: "明日6時にアラーム" }],
+      runtimeFacts: "現在時刻: FACT_MARKER_2026-06-17 15:00 JST\nmode: normal",
+      tools: [addTodo],
+      ctx,
+      ledger,
+      complete,
+    });
+    check(sawFacts, "runtimeFacts が Executor の system に trusted で載っていない");
   }
 
   console.log(`\n=== 結果: ${pass} pass / ${fail} fail ===`);
