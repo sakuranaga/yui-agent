@@ -5,20 +5,25 @@ export const createTimerTool: ToolDef = {
   name: "create_timer",
   description:
     "タイマー (相対秒数カウントダウン) または アラーム (絶対時刻起動) を作成。" +
-    "kind='timer' なら duration_seconds 必須、kind='alarm' なら target_at (ISO8601) 必須。" +
+    "kind='timer' は duration (数) + duration_unit ('seconds'|'minutes'|'hours') で長さを渡す。kind='alarm' は target_at (ISO8601)。" +
+    "「5分」→ duration=5, duration_unit='minutes'。「30秒」→ duration=30, duration_unit='seconds'。「1時間」→ duration=1, duration_unit='hours'。秒換算は app がやるので**自分で掛け算しない**。" +
     "label は任意 (例: 'ラーメン', '会議', 'メール返信')。" +
     "時刻解釈は time context (JST) を基準に。「6時」が過去なら翌日扱い。" +
-    "on_fire_prompt: 発火時に Yui に実行させる内容 (例: 'ポップスかけて', '今日のニュース教えて')。" +
-    "ユーザーが「○分後にYして」「○時にYして」と言った時の Y を on_fire_prompt に入れる。" +
-    "「ラーメン3分」「5分タイマー」のような単純通知なら on_fire_prompt 省略。",
+    "on_fire_prompt は**ユーザーが発火時の行動を明示した時だけ** (「○分後に〜して」の〜) 入れる。" +
+    "単純な時間通知 (「5分タイマー」「40分タイマーかけて」等) は**必ず省略**する (勝手に行動を足さない)。",
   input_schema: {
     type: "object",
     properties: {
       kind: { type: "string", enum: ["timer", "alarm"] },
       label: { type: "string", description: "(任意) 表示用ラベル" },
-      duration_seconds: {
+      duration: {
         type: "integer",
-        description: "kind=timer 用。相対秒数 (例: 5分=300、1時間=3600)",
+        description: "kind=timer 用。長さの**数字だけ** (例: 「5分」→5、「40分」→40、「30秒」→30、「1時間」→1)。掛け算しない。",
+      },
+      duration_unit: {
+        type: "string",
+        enum: ["seconds", "minutes", "hours"],
+        description: "duration の単位。「分」=minutes、「秒」=seconds、「時間」=hours。",
       },
       target_at: {
         type: "string",
@@ -28,7 +33,7 @@ export const createTimerTool: ToolDef = {
       on_fire_prompt: {
         type: "string",
         description:
-          "発火時に Yui に実行させる prompt。例: 'ポップスかけて' / '今日のニュース教えて' / 'タスクの状況を確認して'。省略なら通知のみ。",
+          "(任意) ユーザーが**発火時の行動を明示した時だけ**その行動。単純な時間通知は省略 (勝手に足さない)。",
       },
     },
     required: ["kind"],
@@ -43,16 +48,28 @@ export const createTimerTool: ToolDef = {
     const i = (input ?? {}) as {
       kind?: "timer" | "alarm";
       label?: unknown;
+      duration?: unknown;
+      duration_unit?: unknown;
       duration_seconds?: unknown;
       target_at?: unknown;
       on_fire_prompt?: unknown;
     };
+    // 単位換算は app 側で。tool モデル (xLAM 等) には「数 (duration) + 単位 (duration_unit enum)」
+    // で受けさせ ×60/×3600 を app がやる (xLAM は「40分」→ 秒換算を誤りやすいが enum 充填は得意)。
+    // 後方互換で duration_seconds 直指定も受ける (優先)。
+    const UNIT_FACTOR: Record<string, number> = { seconds: 1, minutes: 60, hours: 3600 };
+    const durationSeconds =
+      typeof i.duration_seconds === "number"
+        ? i.duration_seconds
+        : typeof i.duration === "number"
+          ? i.duration *
+            (UNIT_FACTOR[typeof i.duration_unit === "string" ? i.duration_unit : "minutes"] ?? 60)
+          : undefined;
     const row = await createTimer({
       sessionId: ctx.sessionId,
       kind: i.kind ?? "timer",
       label: typeof i.label === "string" ? i.label : undefined,
-      durationSeconds:
-        typeof i.duration_seconds === "number" ? i.duration_seconds : undefined,
+      durationSeconds,
       targetAt: typeof i.target_at === "string" ? i.target_at : undefined,
       onFirePrompt:
         typeof i.on_fire_prompt === "string" ? i.on_fire_prompt : undefined,
