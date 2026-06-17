@@ -543,6 +543,72 @@ effective = opts.maxTokens != null ? min(opts.maxTokens, entry.maxTokens) : entr
 
 ---
 
+## 8.11 プロンプト KV キャッシュ最適化 (環境ブロックを末尾へ)
+
+> スコープ注: これは #206 (モデル設定) ではなく **chat プロンプト構造の最適化**だが、ローカルモデルを実用化する一連の作業 (§8.8-8.10) の続きとしてここに記録する。
+
+### 8.11.1 問題
+
+`chat/route.ts` の `systemBlocks` には**毎リクエスト変わる揮発ブロックが前方〜中盤に 2 つ**ある:
+1. **環境ブロック** (`buildEnvironmentBlock`、`## 今の環境`、~600-603 行、systemBlocks[1]): 現在時刻を含む。
+2. **記憶ブロック** (`memorySection`、~608 行): `buildQueryText(history, currentUserMsg)` による **L4 semantic 検索 = 現在クエリ依存** + `formatMemoryPrompt` の `new Date()` 相対日付 (Codex High 指摘)。
+
+Anthropic は `cache_control` breakpoint で動くので問題ないが、**llama.cpp のプレフィックスキャッシュは生トークン順が全て**。前方に毎リクエスト変わるブロックがあると**そこから後ろ全部 (~17k トークン) がキャッシュ無効** → ローカル (Qwen3.6-35B 等) のプリフィルが毎ターン ~28 秒の主因。**env だけ動かしても memory が残って効果が限定**されるので、**両方**動かす。
+
+### 8.11.2 設計: 揮発 2 ブロックを最後尾 (現在 user メッセージ) へ
+
+env と memory を **systemBlocks から外し、現在の user ターンの text 先頭に注入**する。
+
+```
+現状: [system: persona + 環境★ + tools + 記憶★ + guards + profile + goals][history][user_new]
+修正: [system: persona + tools + guards + profile + goals][history][user_new: 環境★ + 記憶★ + text]
+                ↑ 全て安定 (キャッシュ可)                          ↑ 末尾だけ再計算
+```
+
+**鍵 (cross-turn キャッシュ)**: env/memory は**リクエスト時に現在ターンへ注入するだけで DB (raw_messages) には保存しない** (DB は `currentUserMsg` を使う)。次ターンで前ターンの user メッセージが**履歴**になる時、env/memory は付いていない。
+
+**再利用範囲 (Codex 中-1 補正)**: 厳密な共通 prefix は `[stable system] + [dynamicContext 挿入点より前の履歴]` まで。dynamicContext を現在 user の先頭に prepend するため、前ターンの user 発話位置で分岐し、**直前ターン (前 user 発話 + 前 Yui 応答) は再計算**される (前 Yui 応答は新規履歴なので元々再計算不可避)。それでも巨大な stable system (persona + 全 tool 定義 + guards) と古い履歴が再利用されるので、~17k の大半がキャッシュヒット。「[system+history] 不変」ではなく「dynamicContext より前の安定 prefix を再利用」が正確。
+
+> profile/goals は半安定 (セッション中は不変、データ更新時のみ変化)。これらは system 後方に残す (変化時のみ cache miss、許容)。完全な不変を狙うなら将来 user ターンへ移すが、現状は env/memory の移動で主効果を得る。
+
+### 8.11.3 実装
+
+- `chat/route.ts`: `systemBlocks` から**環境ブロック push (~600-603) と記憶ブロック push (~608-610) を削除**。`apiMessages` の map で **`isCurrent` (= 最後の user ターン) の text 先頭に runtime context を prepend** する。
+- **境界を明示 (Codex 中-2、注入文脈 vs ユーザー発話の混同/注入防止)**: 注入は wrapper で囲む:
+  ```
+  <yui_runtime_context>
+  ${envBlock}
+
+  ${memorySection}
+  </yui_runtime_context>
+
+  ${userText}
+  ```
+  - `dynamicContext = [envBlock, memorySection].filter(Boolean).join("\n\n")` が空なら wrapper ごと付けない。
+  - **エスケープ**: `userText` 内の `</yui_runtime_context>` 文字列は別表現に置換 (= ユーザーが context を早期 close して注入するのを防ぐ)。
+  - 非画像: 上記を content 文字列に (current は stamp 空)。
+  - 画像: **text block の先頭**に prepend (content 配列順は [画像群, text] のまま。キャッシュ上は末尾なので可。Codex Low: 「content 配列先頭」ではなく「text block 先頭」)。
+- **judge は不変**: `judgeDispatch` は `envBlock` を別引数で受けている (systemBlocks 非経由) ので影響なし。memory も judge は使わない。
+- **2 つの main 呼び (loop 799 + 最終 completion 1008) は両方 apiMessages 経由**で env/memory を見る。
+- env は `## 今の環境` で自己ラベル。memory も自己ラベル付き。Yui system prompt は位置非依存 (「env block の現在時刻を参照」)。user ターン内に移っても LLM は読める。
+
+### 8.11.4 Anthropic キャッシュ (別記、Codex Medium)
+
+llama.cpp の prefix cache 改善とは**別の話**。Anthropic の `cache_control` は現状 persona block にだけ付く (~594)。env/memory を消しただけでは breakpoint が tools/guards/profile/goals まで伸びない。→ **`cache_control` を persona block から「最後の stable systemBlock」へ移す** (Codex Low: 「追加」ではなく「移動」が明確。全 stable プレフィックスを Anthropic cache 対象にする。変化時は普通に cache miss するだけで安全)。
+
+### 8.11.5 挙動・確認 (Codex Low)
+
+- 挙動保存: env/memory の中身・参照は不変。位置が system → 現在 user ターンへ移るだけ。履歴に env/memory を残さない (= 過去の天気/時刻/記憶検索結果が履歴に蓄積しない、むしろ正)。
+- system → user content への降格は、env/memory が「権限指示」ではなくコンテキストなので許容。ただし `yui-prompt.ts:147` 等は env を強く信用する設計 → **実装後に「今の曲」「現在時刻」「天気」「記憶参照」を実機で手動確認**。
+- tool ループで `tool_result` が push され env/memory が最後の message でなくなるのは問題なし (最初の current user message 内に残り、以後の main 呼びも同じ apiMessages)。
+
+### 8.11.6 テスト
+
+- chat route は重い統合経路なので unit は薄め。**手動 (実機)**: ローカル main で 2 ターン目のプリフィル時間が短縮するか (llama-server ログ / `[llm:main]` の dur)。env の中身がチャットで正しく参照されるか (現在時刻・天気)。
+- 可能なら apiMessages 構築のヘルパを切り出して「current user に env/memory が wrapper 付きで prepend され、**履歴にはどちらも付かない**」「userText 内の close タグがエスケープされる」を tsx で検証。
+
+---
+
 ## 9. テスト
 
 - レジストリ CRUD + 移行 seed (既存値 → entry/割当の正しい変換)。
