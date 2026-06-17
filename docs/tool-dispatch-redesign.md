@@ -1,16 +1,26 @@
 # ツール実行と会話生成の分離 — 設計書
 
-> ステータス: **設計 (v1, 未実装)** — 仕様詰め中。Codex レビュー → 承認 → 実装。
+> ステータス: **設計 (v2 改訂中)** — P1/P2 実装済 (挙動不変)。P3 実装前にスコープ修正。
 > 関連: [tool-architecture.md](./tool-architecture.md) (ToolDef / registry / specialist / confirm flow)、
 > [model-config-overhaul.md](./model-config-overhaul.md) §8.8-8.11 (ローカルモデル実用化)。
 > 本書は #206 (モデル設定) とは**独立した機能** = エージェントのツール実行ループそのものの再設計。
+>
+> **v2 改訂 (スコープ修正)**: v1 は「Speaker B/C を新規実装」「specialist を executor 軸へ吸収」「独自 pipeline」を含んでいたが、
+> 実態に対して過剰だった。正しいスコープは:
+> - **会話 main の tools を外すだけ** — B(ack)/C(報告) は**既存 route の main 生成を流用**する (新規 Speaker モジュールは作らない)。
+> - **直ツールのみ dispatchTool (controller) 経由**。specialist は**既存 `dispatchSpecialistJob` パイプラインを温存**し、Executor が specialist 呼び出しを決めたら既存経路へ**橋渡しするだけ** (吸収・書き換えしない)。
+> - **独自 orchestration モジュール (pipeline.ts) は作らない** — オーケストレーションは route に内包し既存処理 (emotion/SSE/voice/永続化) を素通し。
+> v1 で作った `pipeline.ts` は破棄済。dispatchTool / runExecutor (P1/P2) はそのまま活用。
 
 ---
 
 ## 0. 一行サマリ
 
-会話生成モデルに tools を渡すのをやめ、**「会話」「ツール判定/実行」「結果報告」を仕組みで分離**する。
-ツール毎の dispatch メタ (投げっぱなしか / どのモデルで処理するか) を読む **Tool Dispatch Controller** を中核に据える。
+会話生成モデルに tools を渡すのをやめ、**ツールをモデル応答から分離して会話に入れない**。分離したツールは
+**単一の Controller (`dispatchTool`) に渡して実行**し、結衣は会話 (ack/報告) だけを喋る。
+
+シンプルな流れ: **会話 main(tools 無し) → `runExecutor` がツールを分離・判定 → `dispatchTool` (Controller) が実行 → 結衣が ack/報告**。
+**直ツール (registry) の実行**は Controller に一本化 (権限・confirm・untrusted ラップ・ログ・disposition を集約)。specialist は既存パイプラインへ橋渡し (v2 では Controller を通さない)。
 
 ---
 
@@ -57,7 +67,9 @@ Yui:      ふふっ、お調べしますね。
 3. **全モデル適用** — Claude/Gemini も例外にしない (漏れうる + 経路統一)。
 4. **投げっぱなしと報告を柔軟に** — ツール毎にフラグ。二重肯定を避ける。
 5. **失敗は必ず可視化** — silent ツールでも失敗だけは報告 (黙って失敗させない)。
-6. **全ツール実行を Controller に一元化、ただし実装は各ツールファイルへ** — inline / main / specialist / sub-agent の**あらゆる tool use を例外なく Controller の単一関数経由**にする。Controller は横断的関心事 (権限・confirm・untrusted ラップ・ログ・disposition) と振り分けのみを持ち、**ツールの実装ロジックは持たない** (model-less 含め各ツールファイルの handler に閉じる)。役割分離を明確化 → メンテ容易・挙動一貫。
+6. **直ツール実行を Controller (`dispatchTool`) に一元化** — registry ToolDef の**あらゆる直ツール実行を単一関数経由**にし、横断的関心事 (権限・confirm・untrusted ラップ・ログ・disposition) を集約。Controller は**実装ロジックを持たず**、各ツールファイルの handler を呼ぶだけ (役割分離)。
+   - **v2 スコープ**: specialist は既存パイプライン (§5.4) を温存し、Controller には**通さない** (橋渡しのみ)。`dispatchTool` の経路は **direct/inline の 1 段**。
+   - **将来 (P5、任意)**: 「全 tool use を Controller 一本化」を完遂 = specialist **内部**の tool 実行も `dispatchTool` 経由に。コア (漏れ対策) には不要なので後回し。
 
 ---
 
@@ -70,15 +82,14 @@ Yui:      ふふっ、お調べしますね。
   │     └ 「2分後に音楽を止めますね」/ 雑談なら即・本応答
   │     └ 全履歴を見て**意図を文脈解決した自然文** = これがツールのトリガー兼種
   │     └ ユーザーへ即時表示 → 以降は裏で進行 (直列だが非ブロッキング)
-  │     └ `tool_intent:maybe` なら汎用**「処理中」表示**を出す。集約後に出し分け (§8)
+  │     └ Executor が走る間は汎用**「処理中」表示**を出す。集約後に出し分け (§8)
   │
   ▼[A] Executor      (clean prompt + tools, 人格ゼロ。入力 = ユーザー入力 + ack のみ)
   │     └ ack+入力から構造化 tool_calls[] に整形。依存/ID は内部 mini-loop。不要なら空
   │
-  ▼  Controller(dispatchTool) が tool_calls を dispatch メタに従い実行
-  │     ├ inline      : tool ファイルの handler を直接実行
-  │     ├ agent/spec  : 重いモデル sub-agent / specialist に委譲 (難タスク)
-  │     └ disposition : silent (報告なし) / report (結果を会話へ)
+  ▼  分離した tool_calls を振り分けて実行 (v2)
+  │     ├ 直ツール(registry)    : dispatchTool (Controller) → handler。disposition: silent/report
+  │     └ specialist umbrella   : onExtraTool → 既存 dispatchSpecialistJob (judge/SSE/voice/pendingJobs 温存)
   ▼ tool 結果 (executionState: executed/pending_confirmation/skipped/failed)
   [C] Speaker報告   (フル人格, tools 無し, + 結果を文脈) ※ report結果/errorReports/confirmReports 時のみ
       └ ローディング解除 → 「検索したら無二ってお店が…」「失敗しました、権限が…」
@@ -86,7 +97,7 @@ Yui:      ふふっ、お調べしますね。
 
 > **直列・非ブロッキング (A 確定)**: データ依存上は B→Executor→実行→C の直列。ただし B の ack を即表示し、report ターンは B→C の隙間に**ローディング表示** (「検索しています…」) を出す = 現状 UX を踏襲。真の並列 (B と判定を同時刻) は採らない (ack を判定入力にするため)。
 
-- **ツール不要ターン**: B が `tool_intent:none` → Executor スキップ (maybe なら起動して即「空」) → B の発話が本応答 (C 無し)。実質 1 パス、軽量。
+- **ツール不要ターン (v2)**: Executor は常時起動。ツール不要なら Executor が即「空」を返し、B の発話が本応答 (C 無し)。(将来 cheap gate でスキップ最適化可、§8)
 - **silent のみのターン**: B(ack) → Executor → 実行 で完結 (C 無し)。失敗時のみ C でエラー報告。
 - **report ありターン**: B(ack) → Executor → 実行 → C で結果を取り込んだ応答。
 - 会話パス (B/C) は**常に tools 無し** → 会話プロンプトから ~7,000 トークン消滅 (プリフィル減・キャッシュ改善)。
@@ -156,6 +167,8 @@ type ToolDispatch = {
 | | `agent` | 重いモデルの sub-loop で複雑な判定/生成 | レポート生成・予定整理など難タスク |
 | | `{specialist}` | 既存 specialist sub-agent に委譲 (独自モデル) | mail / schedule / music / report |
 
+> **v2 注 (Codex Low①)**: `executor` / `systemPrompt` は P1 で型としては入れたが、**v2 スコープでは未使用**。`resolveDispatch` の実効値は **`disposition` のみ** (直ツールは全て inline 相当、specialist は dispatchTool を通さず別経路で橋渡し §5.4)。`agent`/`{specialist}` は将来拡張のための予約。
+
 ### 4.2 既定値の自動推定 + 明示上書き
 
 - **disposition 既定 (保守側、Codex Medium⑦)**: 名前ベースの単純推定は危険 (`update_*` でも予定更新・連絡先更新・外部送信は確認/報告が要る)。よって:
@@ -171,10 +184,10 @@ type ToolDispatch = {
 ```
 1. Executor pass (clean prompt, 入力 = ユーザー入力 + ack) → tool_calls[]
 2. 各 tool_call について dispatch メタを引く
-3. executor で実行 (いずれも Controller の単一実行関数 dispatchTool() 経由):
-     inline      → tool 関数を直接実行
-     agent       → 重いモデルの sub-loop (clean tool prompt, この tool に限定)
-     specialist  → specialist sub-agent (background, SSE)
+3. tool_use を振り分けて実行 (v2):
+     直ツール(registry ToolDef) → dispatchTool() → handler
+     specialist umbrella        → onExtraTool → 既存 dispatchSpecialistJob (judge/SSE/voice)
+     (agent executor は将来拡張、§7)
 4. executionState × disposition で集約:
      executed  + silent  → 成功は破棄 (B で完結)
      executed  + report  → results[] へ
@@ -202,23 +215,53 @@ type ToolDispatch = {
 - **モデル**: §7。clean prompt なら Qwen で安定 (実測)。サブ(Gemma)候補は要能力検証。
 - **routing ガイダンスの移植**: yui-prompt.ts の「アラーム vs リマインダー」「once/habit 判定」「`func(args)` 例」を **Executor プロンプトへ移設**し、**人格プロンプトからは撤去** (= 漏れ源を断つ + 会話プロンプト軽量化)。
 
-### 5.2 Speaker 即レス (B)
+### 5.2 Speaker 即レス (B) — **既存 route の main 生成を流用**
 
-- **入力**: フル人格 system (tools 無し) + 履歴 + 現在発話。
-- **出力**: ack または雑談本応答。tools が無いので**構造上漏れない**。加えて **`tool_intent: none | maybe` の小さなヒント** (cheap gate 用、§8)。発話テキストとは別フィールドで、構造化ツール呼び出しではないので漏れ源にならない。曖昧時は `maybe` に倒し Executor を必ず起動。
-- **ターンの起点**。ユーザーへ即時表示し、ack 確定後に Executor(A) を起動 (= ユーザー体感は並列)。
+> v2: B は新規モジュールではない。**現状 route が tool ループ 1 回目で出している main 生成から `tools` を外しただけ**。
 
-### 5.3 Speaker 報告 (C)
+- **入力**: フル人格 system (tools 無し) + 履歴 + 現在発話 (= 現状の systemBlocks/apiMessages から tools を外す)。
+- **出力**: ack または雑談本応答。tools が無いので**構造上漏れない**。
+- **ターンの起点**。ユーザーへ即時表示し、ack 確定後に Executor を起動。
+- cheap gate (§8): 既定は常に Executor 起動 (安全側)。`tool_intent:none` の明示スキップは将来の最適化。
+
+### 5.3 Speaker 報告 (C) — **既存 route の「ツール後 main 生成」を流用**
+
+> v2: C も新規モジュールではない。**現状 route がツール実行後に出している完了報告 main 生成から `tools` を外しただけ**。
 
 - **入力**: フル人格 system (tools 無し) + 履歴 + B の発話 + tool 結果 (report) / エラー。
 - **出力**: 結果を踏まえた本応答 / 失敗報告 / 確認待ち通知。`executionState=pending_confirmation` の結果は完了扱いしない (§5.5)。
-- **起動条件**: report 結果 / errorReports / confirmReports のいずれかがある時のみ (§4.3)。
+- **起動条件**: report 結果 / errorReports / confirmReports / 打ち切り通知のいずれかがある時のみ (§4.3)。
 - **untrusted guard 必須 (Codex High③)**: C は tools を持たないが **tool 結果 (web/search/mail/calendar 等の外部由来) を読む**。現状の guard は「露出ツールに `untrustedOutput` がある時に system へ注入」する実装なので、C で tools を外すと **guard も落ちる**。→ C では **tool 結果ブロック単位で untrusted ラップ + injection guard を必ず注入**する規約を独立させる (tool 露出の有無に依存させない)。dispatchTool が結果に付けた untrusted マーカーを C へ引き継ぐ。
 
-### 5.4 Executor 軸 (specialist の一般化)
+### 5.4 specialist の扱い — **既存パイプライン温存 (v2 改訂: 吸収しない)**
 
-既存 specialist (独自モデルの sub-agent + SSE 配信) は **executor の一種**として吸収。
-「inline / agent / specialist」は実行の重さの連続体: 引数だけで済む→inline、複雑な単発判定→agent、長い専門ループ→specialist。
+> v1 は specialist を「executor の一種として吸収」する設計だったが撤回。**specialist は既存の `dispatchSpecialistJob` パイプライン (独自モデル sub-agent + judge + SSE 配信 + voice 整形 + pendingJobs) をそのまま温存**する。
+
+- **会話 main は tools を持たない**ので、specialist 呼び出しの**判定も Executor が行う** (specialist umbrella tool を Executor の tool 一覧に含める)。
+- Executor が specialist umbrella tool を呼んだら、**dispatchTool ではなく既存の specialist 経路へ橋渡し**する (route が提供するコールバック → 既存 `dispatchSpecialistJob` + judge)。書き換えない。
+- 直ツール (registry ToolDef) のみ dispatchTool (inline) で実行。
+- → dispatchTool の責務は **直ツール (inline) 実行に限定**。`executor: agent/{specialist}` の軸は本スコープでは**使わない** (将来拡張、§7)。`ToolDispatch` の実効コアは `disposition` のみ。
+
+#### 5.4.1 橋渡し API (P3 実装境界、Codex v2 High①)
+
+`runExecutor` は現状 direct `ToolDef[]` 前提。specialist umbrella を扱うため**小さな bridge を追加**する:
+
+- Executor に渡す tool カタログ = **direct `ToolDef[]` + specialist umbrella (`Anthropic.Tool[]`) の union**。
+- runExecutor を拡張: `extraTools?: Anthropic.Tool[]` (Executor の tool 一覧に追加) + `onExtraTool?: (toolUse) => Promise<ExecutorOutcome 相当>` (specialist tool_use のハンドラ)。
+- mini-loop は tool_use ごとに分岐: registry ToolDef → `dispatchTool`、specialist umbrella → `onExtraTool`、どちらでもない → unknown/failed。
+- route が `onExtraTool` を実装し、内部で既存 judge + `dispatchSpecialistJob` を呼ぶ。
+
+#### 5.4.2 specialist 成果の集約規約 (二重応答防止、Codex v2 High②)
+
+specialist は**非同期** (dispatchSpecialistJob → pendingJobs → 後で SSE/voice で本返答) なので、C を二重に走らせない:
+
+| 状況 | executionState | disposition | C/後続 |
+|---|---|---|---|
+| dispatch 成功 (job 投入) | `executed` | **`silent`** | C 起動しない。pendingJob 追加 → 結果は**既存 SSE/voice 経路**で配信 |
+| judge skip (env で答え切れる) | `skipped` | — | **B の ack が実質回答済みの場合のみ** C 起動せず ack で完結。ack が「確認しますね」程度で未回答なら C を起動して回答する (skip 理由を渡す)。「黙って答えない」を作らない |
+| dispatch 失敗 | `failed` | report | C で失敗報告 |
+
+→ specialist 成功は **silent 固定** (Executor 側で report として C を呼ばない)。本返答は従来通り SSE/voice。
 
 ### 5.5 dispatchTool() — 単一ディスパッチャ (原則 6)
 
@@ -230,10 +273,9 @@ dispatchTool(call, ctx):          // ← ツール実装は書かない。呼び
   2. global budget / depth / idempotency チェック (下記)
   3. 権限・availability チェック (registry 駆動)
   4. confirm 必要なら confirm flow へ (tool-architecture §4.5) → executionState=pending_confirmation で即返す
-  5. executor に応じて **ツールの handler を呼ぶ**:
+  5. **ツールの handler を呼ぶ** (v2: 直ツールは全て inline):
        inline      → tool.handler(args, ctx)        ← model-less。実装は tool ファイル側
-       agent       → 重いモデルの sub-loop で判定 → tool.handler(...)
-       specialist  → specialist sub-agent (内部の tool use も再び dispatchTool 経由)
+       (agent / specialist executor は v2 スコープ外 = 将来拡張。§7)
   6. 結果を untrusted ラップ (tool-architecture §4.6)
   7. turn-local ledger に記録 (§6 重複抑止)
   8. { executionState, disposition, result } を返す
@@ -242,26 +284,26 @@ dispatchTool(call, ctx):          // ← ツール実装は書かない。呼び
 - **executionState (Codex High②)**: `disposition` とは独立に実行状態を返す:
   `executed | pending_confirmation | skipped | failed`。
   **`pending_confirmation` を成功として破棄/完了報告してはならない** — 必ず「確認待ち」として扱い、C は完了文を出さない。confirm 必要ツールは silent でも pending を握りつぶさない。
-- **再帰の停止性 (Codex High④)**: Executor mini-loop / `executor:agent` sub-loop / specialist / specialist 内 tool use が全て本関数を通るため、個別 `MAX_ITER` では階層跨ぎの二重実行を防げない。**ターン単位の横断ガード**を必須にする:
+- **再帰の停止性 (Codex High④)**: Executor mini-loop は本関数を通る。将来 (P5) specialist 内 tool use や agent sub-loop も通すと階層が深くなるため、個別 `MAX_TOOL_ITER` では階層跨ぎの二重実行を防げない。**ターン単位の横断ガード**を最初から備える (v2 コアでは Executor→dispatchTool の 1 段だが、ガードは将来の多段に耐える設計):
   - **global tool budget**: 1 ターンで実行できる総ツール呼び出し数の上限。
   - **depth limit**: dispatchTool のネスト深さ上限 (specialist→内部 tool→…)。
   - **idempotency key**: `(name, 正規化 input)` をキーに二重実行を抑止するが、**対象は mutation / external-send のみ** (Codex Medium①)。**read-only ツール (`list_*`/`get_*`/`search_*`) は再実行を許可** — `update → list` の確認読みや mutation 後の再読込を弾かない。read の暴走は「**同一状態での連続反復のみ**」停止 (進捗なし検知)。
 - **責務の線引き**:
   - **ツールファイル** = その操作の実装 (model-less 含む。`tool-architecture.md` の domain 別ディレクトリ §4.2)。
   - **Controller** = 横断的関心事 (budget/権限・confirm・untrusted ラップ・ログ・executionState・disposition) + handler への振り分け**のみ**。ロジックを Controller に溜めない。
-- **再帰的**: specialist sub-agent が内部でツールを使う時も、その呼び出しは再び `dispatchTool()` を通る (= 全階層で同じガード・ラップ・ログ)。
+- **再帰的 (将来 P5)**: specialist sub-agent 内部の tool use も `dispatchTool()` を通すと全階層で同じガード・ラップ・ログになる。**v2 では未実施** (specialist は既存パイプライン温存)。budget/depth ガードは将来の多段に備えて最初から入れておく。
 - **runTool() を吸収**: 現状の `runTool()` は `dispatchTool()` に統合。tool-architecture §2.2/§2.3 の「散在」課題を解消。
-- **唯一のチョークポイント**: 全 tool use がこの 1 関数を通る → 抜け道なし、挙動一貫、メンテ容易。
+- **直ツールの唯一のチョークポイント**: registry 直ツールの実行はこの 1 関数を通る → 抜け道なし、挙動一貫、メンテ容易。(specialist は別経路 §5.4、将来 P5 で統合可)
 
 ---
 
 ## 6. 既存資産の統合・置換
 
-| 現状 | 新設計での扱い |
+| 現状 | 新設計での扱い (v2) |
 |---|---|
-| `chat/route.ts` の while(MAX_ITER) tool ループ | Executor の mini-loop へ移設 (会話から分離) |
-| `narrate病 promotion` (route.ts:840) | **廃止** (Speaker は tools を持たない → 行動漏れが原理的に起きない) |
-| specialist dispatch + SSE | `executor:{specialist}` として温存・一般化 |
+| `chat/route.ts` の while(MAX_ITER) tool ループ (main が tools 込みで tool_use 発行) | main から tools を外し、**tool 判定を Executor mini-loop に移設**。tool 実行ボディ (registry/specialist 分岐) は流用 |
+| `narrate病 promotion` (route.ts:840) | **廃止** (会話 main は tools を持たない → 行動漏れが原理的に起きない) |
+| specialist dispatch + SSE + judge + voice + pendingJobs | **既存パイプラインを温存** (§5.4)。Executor が specialist 呼び出しを決定 → 既存 `dispatchSpecialistJob` 経路へ橋渡し (吸収・書き換えしない) |
 | `toolSummary` / `[内部実行ログ]` 履歴注入 | **2 層に分離 (Codex Medium⑧)**: ① turn-local execution ledger = Controller が当該ターン内の実行済 (idempotency) を握り二重実行を抑止。② persistent summary = 次ターン用に履歴へ残す「完了済」注入 (Speaker B 側の履歴に効く。Executor は履歴を持たないので ledger で判断)。 |
 | confirm 経路 (mutation 確認, tool-architecture §4.5) | 維持。`dispatchTool()` が confirm 必要ツールを従来 flow へ回す |
 | `runTool()` (現状の単発実行) | `dispatchTool()` の inline ブランチへ吸収 (§5.5) |
@@ -275,7 +317,7 @@ dispatchTool(call, ctx):          // ← ツール実装は書かない。呼び
 - **適用**: 全モデル (universal)。hosted (Claude) も会話パスは tools 無し = 漏れ不可。
 - **routerモデル** (判定パス = Executor): 既定は **main(Qwen)** (clean prompt で実証済)。
   - サブ(Gemma12b)を routerモデルに使う案は**能力テスト必須** (clean prompt でのツール判定信頼性。M2 の capability probe を流用)。不安なら main にフォールバック。
-- **executor:agent** (tool 専用 sub-agent): 「難しいタスクは重いモデル」をツール単位で指定可能に。routerモデルとは別概念 (Codex Low①)。
+- **executor:agent / {specialist}** (tool 専用 sub-agent): **v2 では本スコープ外 (将来拡張)**。直ツールは全て inline、specialist は既存パイプライン橋渡し (§5.4)。「難しいタスクは重いモデル」をツール単位で指定する agent 軸は、必要になったら追加する。`ToolDispatch.executor`/`systemPrompt` フィールドは P1 で型としては入れたが、当面の実効コアは `disposition` のみ。
 
 ---
 
@@ -283,30 +325,34 @@ dispatchTool(call, ctx):          // ← ツール実装は書かない。呼び
 
 | ターン種別 | パス数 | 体感 |
 |---|---|---|
-| 雑談 (ツール無し) | B のみ (B が `tool_intent:none` なら Executor スキップ、maybe なら起動して即空) | ほぼ現状、会話プロンプト軽量化で**むしろ速い** |
+| 雑談 (ツール無し) | B → Executor 即「空」(v2 は常時起動) | ほぼ現状、会話プロンプト軽量化で**むしろ速い**。将来 cheap gate で Executor 1 call 省略可 |
 | silent のみ | B(即表示) → Executor → 実行 | B 即レスで完結、以降は裏で進行 |
 | report あり | B(即表示) → Executor → 実行 → C | B 即レス後、**ローディング表示**(「検索しています…」)→ C で着地 (現状 ack+SSE と同等) |
 
 - 会話パスから tools (~7k tok) が消える分、各 Speaker パスは現状より軽い。
 - Executor は clean + tools のみで小さい。雑談時は即「空」。
 - 正味のコストは「report ターンで Speaker が 2 回」だが、各回が軽量化されるため悪化は限定的。要実測。
-- **ローディング表示 (A 確定条件、Codex Medium②)**: ack 直後の時点では Executor 未実行で disposition が未確定 (B は `tool_intent:none|maybe` のみ)。よって:
-  - `none` → ローディング無し (雑談)。
-  - `maybe` → **汎用「処理中」インジケータ**を出す。Executor 集約後に出し分け:
-    - **silent 成功のみ** → 即消す (B の ack で完結)。
-    - **report / pending_confirmation / failed** → 継続し、C 着地 (「検索しました…」等) で解除。
+- **ローディング表示 (v2)**: B の ack を即表示し、**Executor が走る間は汎用「処理中」インジケータ**を出す。Executor 集約後に出し分け:
+  - **silent 成功のみ / ツール無し** → 即消す (B の ack で完結)。
+  - **report / pending_confirmation / failed / 打ち切り** → 継続し、C 着地 (「検索しました…」等) で解除。
   - 現状の loading/SSE pending UX を踏襲。直列でも「放置されている」感を出さない。
-- **cheap gate (Codex Medium⑥ → 2巡で保守化)**: 雑談でも Executor を毎回 LLM 起動すると 1 call 増える。ただし**文面ヒューリスティックでのスキップは「ツール必要判定の取りこぼし」を再導入する** (B が「見ておきますね」等の曖昧 ack を返す場合)。よって **skip は B が明示した `tool_intent: none` の時のみ**。`tool_intent` は B が出す小さな enum (`none | maybe`) で、曖昧・maybe なら必ず Executor 起動 (= 安全側)。文面推測でのスキップはしない。補助的に **tool candidate pruning** (ドメイン推定で渡す tools を絞る) で Executor 呼び出し自体を軽くする。
+- **cheap gate (将来最適化)**: v2 P3 は **Executor を常時起動** (安全側 = 取りこぼさない)。雑談でも 1 call 増えるコストはあるが、会話プロンプト軽量化で相殺。将来、B が `tool_intent` のような明示 hint を出せるようになったら「none の時だけ Executor スキップ」を足す (文面ヒューリスティックでのスキップは取りこぼすので不可)。補助的に tool candidate pruning も可。**v2 では実装しない**。
 
 ---
 
 ## 9. 移行段取り (案)
 
-- **P1**: dispatch メタ (`ToolDispatch`) を ToolDef に追加 + 既定推定。全ツールに付与 (挙動は変えず、メタだけ整備)。
-- **P2**: Executor パス (clean prompt + tools, mini-loop) を実装。routing ガイダンスを移植。
-- **P3**: Speaker B/C を tools 無しで実装。Controller で **B → Executor → 実行 → C** (直列・非ブロッキング) を配線。`maybe` で「処理中」表示。
-- **P4**: narrate病 promotion 撤去、会話プロンプトから tools 定義撤去。
-- **P5**: specialist を executor 軸へ吸収。
+- **P1 (済)**: dispatch メタ (`ToolDispatch`) を ToolDef に追加 + 既定推定。挙動不変。
+- **P2 (済)**: `dispatchTool` 単一ゲートウェイ (P2a) + `runExecutor` mini-loop (P2b)。挙動不変。
+- **P3 (次)**: **route 配線**。chat/route.ts のループで:
+  - 会話 main (B/C) から **`tools` を外す** (= 漏れない)。
+  - main 応答後、`runExecutor` で tool を分離・判定し `dispatchTool` で実行 (直ツール)。
+  - specialist umbrella tool は **既存 `dispatchSpecialistJob` 経路へ橋渡し** (judge/SSE/voice/pendingJobs 温存)。
+  - tool 結果を踏まえ main で報告 (C)。emotion/永続化/SSE は既存処理を素通し。
+  - `narrate病 promotion` は廃止 (会話 main が tools を持たない)。
+  - **独自 pipeline モジュールは作らない** (orchestration は route 内)。
+- **P4**: routing ガイダンスを Executor プロンプトへ移植し、**人格プロンプトから tools 定義・guidance を撤去** (会話プロンプト軽量化)。
+- **P5 (任意・将来)**: 「全 tool use を Controller 一本化」の完遂 = specialist **内部**の tool 実行も `dispatchTool` 経由に (specialist の dispatch/SSE/voice パイプライン自体は温存のまま、内部の runTool を dispatchTool へ)。コア (漏れ対策) には必須でないため後回し可。
 - 各 P で Codex レビュー + 実機テスト。
 - **フラグはリクエスト単位で排他 (Codex Medium⑨)**: 「旧ループ / 新ループ」を 1 リクエストにつき**どちらか一方だけ**が action を拾うよう排他切替。新旧が同一ターンで二重 dispatch しない条件を明記。P3/P4 の「Speaker を tools 無しにした後 promotion/tools 撤去が後回し」になる期間に、新旧両方が action を拾う窓を作らない (Speaker を tools 無しにするのと promotion 撤去・tools 撤去は同一フラグ配下で一斉に切替)。
 
@@ -332,7 +378,8 @@ dispatchTool(call, ctx):          // ← ツール実装は書かない。呼び
 - **再帰ガード (High④)**: global budget / depth 上限 / idempotency key で、階層跨ぎ・再試行時の同一 mutation 二重実行が起きない。
 - **C の untrusted (High③)**: tools 無しの C でも、外部 tool 結果に injection guard が注入される。
 - **依存ツール**: `add_todo → add_reminder(ref_id)` が Executor mini-loop で成立。
-- **executor**: inline/agent/specialist が各々正しい実行系に回る。
-- **cheap gate (Medium⑥)**: 純雑談で Executor の LLM 呼び出しが増えない。
+- **直ツール / specialist 橋渡し**: registry 直ツールは dispatchTool (inline) へ、specialist umbrella tool は `onExtraTool` → 既存 `dispatchSpecialistJob` へ正しく振り分く。specialist 成功は silent (C 二重起動なし)、dispatch 失敗は C で報告 (§5.4.2)。
+- **judge skip の分岐 (§5.4.2)**: judge skip かつ B ack が実質回答済み → C 起動せず ack 完結。judge skip だが ack 未回答 (「確認しますね」等) → C が回答する (黙って答えないを作らない)。
+- **雑談 (v2 常時起動)**: 純雑談では Executor が空 (tool_calls 無し) を返し、C が起動せず B の発話が本応答。
 - **キャッシュ**: 会話パスのプロンプトが tools 撤去で縮小 (~13k) し、プリフィル短縮。
 - **手動 (実機)**: 「タイマー」「検索」「予定登録」「雑談」の各経路。routerモデル別 (Qwen/Gemma) の判定精度。
