@@ -1,0 +1,38 @@
+# Yui Agent 用 PostgreSQL 18 image: pgvector + PGroonga 同居。
+#
+# 目的 (docs/tool-dispatch-redesign.md §12.6):
+#   - pgvector  : ベクトル検索 (記憶/ノート/tool_index の dense チャネル)
+#   - PGroonga  : 日本語全文検索 (tool_index の lexical チャネル、MeCab/Bigram)
+#
+# base は pgvector 公式 image を digest pin (Codex: tag mutable 回避)。
+# Debian の codename は digest pin した実体に従い、build 時に lsb_release で取得する
+# (固定コメントにしない)。そこに PGroonga apt を追加 (pgroonga/docker debian/18 準拠)。
+#
+# 旧構成は ankane/pgvector:latest (PG15.4・非推奨)。本 image への移行は
+# logical dump/restore (§12.6、scripts/upgrade-pg18.sh)。data dir 非互換のため
+# 既存ボリュームをそのまま使ってはならない。
+FROM pgvector/pgvector:pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
+
+# PGroonga (Groonga ベースの PostgreSQL 全文検索拡張) を追加。
+# apache-arrow + groonga の apt source を入れてから postgresql-18-pgdg-pgroonga を導入。
+# build ログに apt-cache policy を残す (可用性確認、§12.6 smoke test)。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends lsb-release wget ca-certificates gnupg; \
+    codename="$(lsb_release --codename --short)"; \
+    wget -q "https://packages.apache.org/artifactory/arrow/debian/apache-arrow-apt-source-latest-${codename}.deb"; \
+    apt-get install -y -V "./apache-arrow-apt-source-latest-${codename}.deb"; \
+    rm "apache-arrow-apt-source-latest-${codename}.deb"; \
+    wget -q "https://packages.groonga.org/debian/groonga-apt-source-latest-${codename}.deb"; \
+    apt-get install -y -V "./groonga-apt-source-latest-${codename}.deb"; \
+    rm "groonga-apt-source-latest-${codename}.deb"; \
+    apt-get update; \
+    echo "=== apt-cache policy (PGroonga 可用性) ==="; \
+    apt-cache policy postgresql-18-pgdg-pgroonga groonga-tokenizer-mecab; \
+    apt-get install -y -V \
+      postgresql-18-pgdg-pgroonga \
+      groonga-normalizer-mysql \
+      groonga-tokenizer-mecab \
+      groonga-token-filter-stem; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*

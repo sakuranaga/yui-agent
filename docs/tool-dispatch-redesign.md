@@ -535,6 +535,7 @@ Executor は **1 種の標準リクエスト**を投げ、返りの**エンコ�
 - **base = `pgvector/pgvector:pg18` を digest pin** (公式 pgvector + PG18) に **PGroonga apt を追加** (pgroonga/docker debian/18 準拠: apache-arrow + groonga apt source → `postgresql-18-pgdg-pgroonga` + `groonga-tokenizer-mecab` + `groonga-normalizer-mysql`)。codename は `lsb_release` で自動追従。
   - build step で `apt-cache policy postgresql-18-pgdg-pgroonga groonga-tokenizer-mecab` を確認し、可用性が無ければ `FROM postgres:18-trixie` + 両拡張明示にフォールバック (Codex High①: tag mutable 回避で digest pin、版は build ログに残す)。
 - compose の `image: ankane/pgvector:latest` (+ `postgres_data`) を **`build:` + 新 volume `postgres_data_pg18`** に差替。
+- **PG18 のデータディレクトリ変更 (実機リハーサルで判明、docker-library/postgres #1259)**: PG18 は data を `/var/lib/postgresql` 配下の版別サブディレクトリ (`/var/lib/postgresql/18/docker`) に置く。**新 PG18 volume は `/var/lib/postgresql` (親) にマウント** (PG15 の `/var/lib/postgresql/data` ではない)。誤ると PG18 が起動拒否。`Dockerfile.postgres` / `scripts/upgrade-pg18.sh` / `docs/upgrade-pg18.md` に反映済。
 
 #### 移行手順 (不可逆操作プロトコル、PRIME DIRECTIVE)
 0. **前提チェック**: 現 PG version (15)、disk 空き (dump サイズ)、PostgreSQL **16/17/18 release notes の breaking changes 確認** (拡張・認証・設定パラメータ・予約語・planner、Codex Low)。**dump/restore は PG18 client を使う** — 旧 PG15 server へ PG18 client で接続して dump、`pg_dump`/`pg_restore --version` を log に残す (Codex Medium)。
