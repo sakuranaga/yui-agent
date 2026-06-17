@@ -125,6 +125,17 @@ export async function getActiveToolIndexVersion(): Promise<string | null> {
 export type ToolRetrievalMode = "hybrid" | "lexical-only" | "full-catalog";
 export type ToolRetrieval = { toolNames: string[]; mode: ToolRetrievalMode };
 
+// 絞り込み候補で #2 が no_tool_calls を返した時、full catalog 再試行を起動するかの
+// **保守的 gate** (§12.2)。false-positive は許容 (full に回るだけ)、false-negative は危険
+// (静かな未実行)。動作語を広めに拾う。untrusted text は判定材料にしない (= 最新発話のみで判定)。
+const ACTION_INTENT_RE =
+  /(作っ|作成|追加|登録|入れ|消し|削除|外し|更新|変更|ずらし|キャンセル|止め|完了|終わ|検索|調べ|教え|取得|送っ|送信|予約|リマインド|タイマー|アラーム|予定|スケジュール|メール|再生|かけ|流し|スキップ|次の曲|前の曲|音量|保存|メモ|記録|読ん|戻し|やって|して|してくれ|ほしい|登録|セット)/;
+
+/** 最新発話が action 意図っぽいか (full catalog 再試行の gate)。 */
+export function isActionIntent(text: string): boolean {
+  return ACTION_INTENT_RE.test(text);
+}
+
 /**
  * Executor #2 に渡すツール候補を絞り込む (§12.2)。
  *

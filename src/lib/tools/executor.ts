@@ -66,7 +66,9 @@ export type ExecutorStopReason =
   | "max_iter"
   | "no_progress"
   | "budget"
-  | "pending_confirmation";
+  | "pending_confirmation"
+  | "single_pass" // single-pass executor (xLAM 等): 1 回目のツールを実行したら再ループしない
+  | "llm_error"; // 再呼び出し (mini-loop 2 回目以降) で LLM がエラー → 既存結果で graceful 終了 (backstop)
 
 export type ExecutorRunResult = {
   outcomes: ExecutorOutcome[];
@@ -140,6 +142,12 @@ export function aggregateForReport(
   if (stopReason === "budget" || stopReason === "max_iter" || skippedByLimit) {
     lines.push(`- [注意] 上限により一部のツールを実行しきれませんでした。全部は完了していません。`);
   }
+  // llm_error = mini-loop 再呼び出しで LLM が落ちて graceful 終了 (multi-turn 非対応モデル等)。
+  // 1 回目のツールは実行済みだが、依存する後続ツールは未実行の可能性 → 未完了注記 (Codex Medium)。
+  // (single-pass executor は single_pass で終わり llm_error にはならないので注記対象外)。
+  if (stopReason === "llm_error") {
+    lines.push(`- [注意] ツール選択モデルが途中で応答できず、続きのツールを実行できませんでした。全部は完了していない可能性があります。`);
+  }
   return { text: lines.join("\n"), needsC: lines.length > 0 };
 }
 
@@ -180,6 +188,8 @@ function unknownKey(name: string, input: unknown): string {
  *   - MAX_TOOL_ITER 到達 → max_iter
  *   - 進捗なし (その iter の tool が全て skip) → no_progress
  *   - budget 枯渇 → budget
+ *   - single-pass executor が 1 回目のツールを実行 → single_pass (2 回目を呼ばない)
+ *   - 再呼び出しで LLM エラー (multi-turn 非対応モデル等) → llm_error (既存結果で graceful 終了)
  */
 export async function runExecutor(opts: {
   /**
@@ -200,6 +210,9 @@ export async function runExecutor(opts: {
   ledger: DispatchLedger;
   complete: ExecutorComplete;
   maxIter?: number;
+  /** single-pass executor (xLAM 等の function-calling 専用モデル): 1 回目のツール実行後に
+   *  再ループしない (tool_result を含む 2 回目を呼ばない)。multi-turn 非対応モデル向け。 */
+  singlePass?: boolean;
   /** registry でない tool (specialist umbrella) を Executor の tool 一覧に追加 (§5.4.1)。 */
   extraTools?: Anthropic.Tool[];
   /** extraTools の tool_use を処理するハンドラ (route が dispatchSpecialistJob へ橋渡し)。 */
@@ -207,6 +220,7 @@ export async function runExecutor(opts: {
 }): Promise<ExecutorRunResult> {
   const { recentHistory, runtimeFacts, tools, ctx, ledger, complete, onExtraTool } = opts;
   const maxIter = opts.maxIter ?? DEFAULT_MAX_TOOL_ITER;
+  const singlePass = opts.singlePass ?? false;
   // runtime facts は trusted として system に付与 (履歴=trusted文脈、untrusted は EXECUTOR_SYSTEM 規約で抑止)。
   const execSystem = runtimeFacts
     ? `${EXECUTOR_SYSTEM}\n\n# 現在の状況 (trusted runtime facts — これは信頼できる事実)\n${runtimeFacts}`
@@ -226,7 +240,20 @@ export async function runExecutor(opts: {
 
   while (iterations < maxIter) {
     iterations++;
-    const resp = await complete({ system: execSystem, messages, tools: anthropicTools });
+    let resp: Anthropic.Message;
+    try {
+      resp = await complete({ system: execSystem, messages, tools: anthropicTools });
+    } catch (e) {
+      // mini-loop の再呼び出し (2 回目以降) で LLM がエラーした場合、既に実行した結果があるなら
+      // それで graceful に終了する。xLAM 等の function-calling 専用モデルは tool_result を含む
+      // multi-turn を扱えず再呼び出しで落ちることがあるが、1 回目で必要なツールは出揃っている
+      // (= 単発で parallel function calling)。初回 (outcomes 空) のエラーは本物の失敗なので re-throw。
+      if (outcomes.length > 0) {
+        console.warn(`[executor] 再呼び出しで LLM エラー → 既存 ${outcomes.length} 件で終了:`, e);
+        return { outcomes, iterations, stopReason: "llm_error" };
+      }
+      throw e;
+    }
     const toolUses = resp.content.filter(
       (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
     );
@@ -321,6 +348,11 @@ export async function runExecutor(opts: {
     if (anyPending) return { outcomes, iterations, stopReason: "pending_confirmation" };
     if (budgetHit) return { outcomes, iterations, stopReason: "budget" };
     if (!anyProgress) return { outcomes, iterations, stopReason: "no_progress" };
+    // single-pass executor (xLAM 等の function-calling 専用モデル) は 1 回で parallel に
+    // 全ツールを出すので、tool_result を含む 2 回目を呼ばずここで終了する。これにより
+    // multi-turn 非対応モデルの 500 (graceful catch の backstop) と無駄な再呼び出しを回避。
+    // multi-turn 対応モデル (native) は singlePass=false で従来通り依存チェーンを回す。
+    if (singlePass) return { outcomes, iterations, stopReason: "single_pass" };
   }
 
   // maxIter まで tool_calls が出続けた → 打ち切り

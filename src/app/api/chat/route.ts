@@ -39,6 +39,7 @@ import {
   aggregateForReport,
   type ExtraToolHandler,
 } from "@/lib/tools/executor";
+import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
@@ -305,7 +306,7 @@ function briefToolInput(toolName: string, input: Record<string, unknown>): strin
   }
 }
 
-import { callLlm, withTrace } from "@/lib/llm";
+import { callLlm, withTrace, resolveEntry } from "@/lib/llm";
 import { getAnthropicConfig } from "@/lib/ai-settings";
 
 
@@ -827,12 +828,26 @@ async function handlePost(req: Request): Promise<Response> {
     // 【後回し (ユーザー判断: specialist 機構の再設計時)】judge skip かつ #1 未回答時の C 起動連携 (Codex 実装 High①)。
     // RECENT_HISTORY_TURNS は executor.ts のレバー参照、テストで調整。
     const RECENT_HISTORY_TURNS = 3;
+    // #2 (Executor) には **ユーザー発話 (= 依頼) のみ**を渡す。Yui の persona assistant turn
+    // を入れると、xLAM 等の function-calling 専用モデルが persona を模倣して「はい、タイマー
+    // かけましたよ」のような会話文を返し、ツールを選ばなくなる (実機で確認)。会話文脈
+    // (「じゃ予定入れて」等の照応) は過去のユーザー発話だけで足りる。§5.1 の trusted 履歴を
+    // user-only に絞る。
     const recentHistory: Anthropic.MessageParam[] = messages
       .slice(-(RECENT_HISTORY_TURNS * 2))
+      .filter((m) => m.role !== "assistant")
       .map((m) => ({
-        role: m.role === "assistant" ? ("assistant" as const) : ("user" as const),
+        role: "user" as const,
         content: typeof m.content === "string" ? m.content : String(m.content ?? ""),
       }));
+    // 最新ユーザー発話を必ず末尾に (private mode 等で履歴が空/薄くても依頼が届くように)。
+    const lastRH = recentHistory[recentHistory.length - 1];
+    if (!lastRH || lastRH.content !== currentUserMsg) {
+      recentHistory.push({ role: "user", content: currentUserMsg });
+    }
+    if (process.env.NODE_ENV !== "production") {
+      console.log(`[executor-input] recentHistory=${recentHistory.length}件(user-only) last="${String(recentHistory[recentHistory.length - 1]?.content).slice(0, 30)}"`);
+    }
     const runtimeFacts = [
       `現在時刻: ${chatTimestampMarker(new Date())}`,
       `mode: ${toolMode}`,
@@ -910,20 +925,83 @@ async function handlePost(req: Request): Promise<Response> {
     const [bResp, exec] = await Promise.all([
       callLlm("main", { system: systemBlocks, messages: apiMessages }), // #1
       runExec
-        ? runExecutor({
-            recentHistory, // #2: 直近 ~3 ターン履歴 (trusted, env/memory 注入なし)
-            runtimeFacts, // trusted: 現在時刻/mode/source (ack を使わないので明示)
-            tools: registryTools,
-            ctx: mainCtx,
-            ledger: dispatchLedger,
-            complete: async ({ system, messages: m, tools: t }) => {
-              const r = await callLlm("main", { system, messages: m, tools: t });
-              accUsage(r);
-              return r;
-            },
-            extraTools: exposedSpecialistTools,
-            onExtraTool,
-          })
+        ? (async () => {
+            // #2 直前に直ツール候補をベクトル+lexical 検索で絞る (§12.2)。#1 と並列なので
+            // 発話(#1) の critical path にレイテンシは乗らない。query=trusted な最新発話。
+            // 失敗 / 候補空 / full-catalog mode は registryTools をそのまま使う (= 安全側)。
+            // specialist umbrella (exposedSpecialistTools) は retrieval 対象外で常に全件渡す
+            // (削られない = 安全。multi-tool で specialist が要るケースは将来 tool_index に統合)。
+            let executorTools = registryTools;
+            if (registryTools.length > 0) {
+              try {
+                const retrieval = await retrieveToolCandidates({
+                  query: currentUserMsg,
+                  permitted: registryTools,
+                });
+                if (retrieval.mode !== "full-catalog") {
+                  const candidateSet = new Set(retrieval.toolNames);
+                  const filtered = registryTools.filter((t) => candidateSet.has(t.name));
+                  if (filtered.length > 0) executorTools = filtered;
+                }
+                if (process.env.NODE_ENV !== "production") {
+                  console.log(
+                    `[tool-retrieval] mode=${retrieval.mode} ${registryTools.length}→${executorTools.length} q="${currentUserMsg.slice(0, 30)}"`,
+                  );
+                }
+              } catch (e) {
+                console.warn("[tool-retrieval] 失敗 → 全ツールで継続:", e);
+              }
+            }
+            // executor が **既知の function-calling 専用モデル (xLAM 等)** なら single-pass で回す
+            // (tool_result を含む 2 回目を呼ばない = multi-turn 非対応の 500/無駄呼び出しを回避)。
+            // provider 全体 (local_openai) で判定すると multi-turn 可能なローカルモデルの依存チェーンを
+            // 静かに捨てるので model-id allowlist に限定 (Codex High)。allowlist 外は multi-turn で回す。
+            // multi-turn 不可な allowlist 外モデルは graceful catch (llm_error) でチャット全体の 500 は防ぐが、
+            // **依存チェーンの完遂は保証しない** (llm_error は aggregateForReport で未完了注記される、Codex Medium)。
+            // 注: callLlm の primary 失敗 fallback で実モデルがズレる稀ケースも同様に backstop/注記で扱う。
+            const execEntry = await resolveEntry("executor").catch(() => null);
+            const singlePass = /xlam|functionary|gorilla/i.test(execEntry?.entry.modelId ?? "");
+            // xLAM 等の function-calling 専用モデルは**多ターン履歴で値を混同**する (実機確認:
+            // 履歴に過去の「タイマー10分」があると最新の「5分」を無視して 10 を拾う)。
+            // → single-pass モデルには **現発話のみ**渡す。multi-turn 対応モデル (native) は
+            // 文脈 (「じゃ予定入れて」等の照応) のため user-only 履歴を渡す。
+            const execHistory = singlePass
+              ? [{ role: "user" as const, content: currentUserMsg }]
+              : recentHistory;
+            const runOnce = (tools: typeof registryTools) =>
+              runExecutor({
+                recentHistory: execHistory, // single-pass=現発話のみ / それ以外=user-only 履歴
+                runtimeFacts, // trusted: 現在時刻/mode/source (ack を使わないので明示)
+                tools,
+                singlePass,
+                ctx: mainCtx,
+                ledger: dispatchLedger,
+                // #2 のツール選択は executor role = tool tier (xLAM 等の専用モデル、設定で割当)。
+                // 未割当なら sub fallback / 防御 Haiku に倒れる (ネイティブ tool-use で動く)。
+                complete: async ({ system, messages: m, tools: t }) => {
+                  const r = await callLlm("executor", { system, messages: m, tools: t });
+                  accUsage(r);
+                  return r;
+                },
+                extraTools: exposedSpecialistTools,
+                onExtraTool,
+              });
+            let result = await runOnce(executorTools);
+            // 絞った候補で #2 が no_tool_calls を返し、かつ action-intent っぽければ、正解ツールが
+            // 候補から漏れた silent miss を疑い full registryTools で 1 回だけ再試行 (§12.2 retrieval fallback)。
+            // ledger 共有なので二重実行は idempotency で防がれる (初回は何も実行していない)。
+            // 再試行は「**何も実行されなかった**」時のみ。multi-turn (Haiku 等) は成功しても
+            // 最終 iteration が no_tool_calls で終わるため、stopReason で判定すると「実行済みなのに
+            // 再試行 → 二重実行」になる (実機: カレンダー予定が 2 回作成)。outcomes 空で判定する。
+            const narrowed = executorTools.length < registryTools.length;
+            if (narrowed && result.outcomes.length === 0 && isActionIntent(currentUserMsg)) {
+              if (process.env.NODE_ENV !== "production") {
+                console.log("[tool-retrieval] no_tool_calls + action-intent → full catalog 再試行");
+              }
+              result = await runOnce(registryTools);
+            }
+            return result;
+          })()
         : Promise.resolve(null),
     ]);
     accUsage(bResp);
@@ -1071,8 +1149,11 @@ async function handlePost(req: Request): Promise<Response> {
       if (isPrivate) {
         const { appendOverlay } = await import("@/lib/conversation-overlay");
         const ts = Date.now();
-        // cron / timer source は user 側の trigger を残さない (raw_messages 経路と同じ判断)
-        if (source !== "cron" && source !== "timer") {
+        // cron / timer / tool_confirm_result source は user 側の trigger (内部発火・確認完了
+        // ディレクティブ) を残さない (raw_messages 経路と同じ判断、§1179)。これが無いと private
+        // モードで <yui_directive> 完了報告プロンプトが user 発言として overlay に残り、
+        // リロード時にユーザー発言として表示されてしまう。
+        if (source !== "cron" && source !== "timer" && source !== "tool_confirm_result") {
           await appendOverlay(sessionId, {
             role: "user",
             content: currentUserMsg,
