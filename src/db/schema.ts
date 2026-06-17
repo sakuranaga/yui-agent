@@ -1372,3 +1372,45 @@ export type VrmModel = typeof vrmModels.$inferSelect;
 export type NewVrmModel = typeof vrmModels.$inferInsert;
 export type VrmSettings = typeof vrmSettings.$inferSelect;
 export type NewVrmSettings = typeof vrmSettings.$inferInsert;
+
+/**
+ * ツール検索 (Executor #2 の候補絞り込み) 用インデックス。
+ * 設計: docs/tool-dispatch-redesign.md §12.2 / §12.4。
+ *
+ * 各ツールに「例文 (example) N 件 + description 1 件」を行として持ち、dense
+ * (pgvector cosine) + lexical (PGroonga) のハイブリッド検索で候補を絞る。
+ * **元テキスト (text) も保持**し、embed モデル変更時は再インデックスで対応する
+ * (= ベクトルは text の導出物)。`embedding_model`/`embedding_dimensions` で stale /
+ * 次元不一致を検知、`index_version` で atomic 再構築 (active は tool_index_meta)。
+ *
+ * UNIQUE(tool_name, kind, md5(text), index_version) / HNSW / PGroonga index は
+ * migration 0072 の生 SQL 側で定義 (既存 note_chunks/memory_chunks と同方針)。
+ */
+export const toolIndex = pgTable("tool_index", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  toolName: text("tool_name").notNull(),
+  // 'example' = 発話例 (symmetric retrieval の本体) / 'description' = 説明 (保険)
+  kind: text("kind").notNull().$type<"example" | "description">(),
+  text: text("text").notNull(), // 元テキスト (再 embed の正本)
+  embedding: vector("embedding", { dimensions: 1024 }).notNull(),
+  embeddingModel: text("embedding_model").notNull(),
+  embeddingDimensions: integer("embedding_dimensions").notNull(),
+  indexVersion: text("index_version").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * tool_index のメタ (key-value)。`active_tool_index_version` を保持し、検索クエリは
+ * active version の行だけを見る (再構築は新 version を作り切ってから active を切替)。
+ */
+export const toolIndexMeta = pgTable("tool_index_meta", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ToolIndexRow = typeof toolIndex.$inferSelect;
+export type NewToolIndexRow = typeof toolIndex.$inferInsert;
+export type ToolIndexMeta = typeof toolIndexMeta.$inferSelect;
+export type NewToolIndexMeta = typeof toolIndexMeta.$inferInsert;
