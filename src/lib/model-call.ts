@@ -47,7 +47,10 @@ export async function callModelDirect(
   entry: ModelEntry,
   opts: DirectCallOpts
 ): Promise<Anthropic.Message> {
-  const maxTokens = opts.maxTokens ?? 256;
+  // 出力上限は per-model の entry.maxTokens (#206 §8.10)。呼び側が指定すればその値、
+  // 未指定ならモデルの上限をフル使用。いずれも entry.maxTokens でキャップ。
+  const requested = opts.maxTokens ?? entry.maxTokens;
+  const maxTokens = Math.min(requested, entry.maxTokens);
   const hasTools = !!opts.tools && opts.tools.length > 0;
 
   if (entry.provider === "anthropic") {
@@ -121,6 +124,8 @@ export async function callModelDirect(
     tools: opts.tools,
     toolChoice: opts.toolChoice,
     temperature: opts.temperature,
+    // reasoning model の 2000 floor が entry.maxTokens を超えないよう ceiling を渡す (#206 §8.10)
+    maxTokensCeiling: entry.maxTokens,
     // thinking 制御 (#206 §8.9) はローカル self-host (Gemma/Qwen) のみに送る
     // (hosted の openai/grok に chat_template_kwargs を送ると 400 になりうる)。
     enableThinking: entry.provider === "local_openai" ? opts.enableThinking : undefined,

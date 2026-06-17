@@ -36,11 +36,9 @@ import { buildEnvironmentBlock } from "@/lib/environment";
 import { callLlm, withTrace } from "@/lib/llm";
 
 // Voice formatter は主ターンとは別モデル指定可能 (デフォルトは Haiku、env: ANTHROPIC_VOICE_MODEL)。
-// 主ターンを Sonnet/Opus に上げても voice の応答スピードは保つため。
-const YUI_MAX_TOKENS = parseInt(
-  process.env.ANTHROPIC_MAX_TOKENS ?? "400",
-  10
-);
+// 短い口頭報告セリフなので固定の小さい上限 (#206 §8.10: env ではなく固定値。
+// 外すと entry.maxTokens=8192 まで開いて挙動が変わるため voice には十分な 800 を据え置く)。
+const VOICE_MAX_TOKENS = 800;
 
 type ConversationTurn = { role: "user" | "assistant"; content: string };
 
@@ -408,7 +406,7 @@ async function formatInYuiVoice(opts: {
   const persona = await loadPersona();
   const envBlock = await buildEnvironmentBlock({ sessionId: opts.sessionId });
   const response = await callLlm("voice", {
-    maxTokens: YUI_MAX_TOKENS,
+    maxTokens: VOICE_MAX_TOKENS,
     system: [
       {
         type: "text",

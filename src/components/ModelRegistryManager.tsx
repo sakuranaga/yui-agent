@@ -33,6 +33,7 @@ type ModelEntry = {
   apiKeyRef: string | null;
   capabilities: Capabilities;
   thinkingMode: ThinkingMode;
+  maxTokens: number;
 };
 
 type TierName = "main" | "sub" | "heavy";
@@ -132,8 +133,8 @@ export default function ModelRegistryManager() {
 
   // 追加 / 編集フォーム
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<{ label: string; provider: Provider; modelId: string; baseUrl: string }>({
-    label: "", provider: "anthropic", modelId: "", baseUrl: "",
+  const [form, setForm] = useState<{ label: string; provider: Provider; modelId: string; baseUrl: string; maxTokens: string }>({
+    label: "", provider: "anthropic", modelId: "", baseUrl: "", maxTokens: "8192",
   });
   const [editId, setEditId] = useState<string | null>(null);
   const [formErr, setFormErr] = useState<string | null>(null);
@@ -221,10 +222,18 @@ export default function ModelRegistryManager() {
 
   const submitForm = async () => {
     setFormErr(null);
+    // 正の整数のみ (parseInt は "1.5"→1 / "12a"→12 と丸めるので文字列で厳密判定)
+    const mtStr = form.maxTokens.trim();
+    if (!/^[1-9]\d*$/.test(mtStr) || Number(mtStr) > 1048576) {
+      setFormErr("最大トークンは 1〜1048576 の整数で入力してください");
+      return;
+    }
+    const mt = Number(mtStr);
     const payload = {
       label: form.label.trim(),
       provider: form.provider,
       modelId: form.modelId.trim(),
+      maxTokens: mt,
       ...(form.provider === "local_openai" ? { baseUrl: form.baseUrl.trim() } : {}),
     };
     try {
@@ -242,7 +251,7 @@ export default function ModelRegistryManager() {
       if (res.ok) {
         setAdding(false);
         setEditId(null);
-        setForm({ label: "", provider: "anthropic", modelId: "", baseUrl: "" });
+        setForm({ label: "", provider: "anthropic", modelId: "", baseUrl: "", maxTokens: "8192" });
         await load();
       } else {
         const body = (await res.json()) as { error?: string; references?: string[] };
@@ -258,7 +267,7 @@ export default function ModelRegistryManager() {
     setAdding(true);
     setFormErr(null);
     setManualModel(true); // 編集は現在の modelId をそのまま見せる (テキスト入力)
-    setForm({ label: e.label, provider: e.provider, modelId: e.modelId, baseUrl: e.baseUrl ?? "" });
+    setForm({ label: e.label, provider: e.provider, modelId: e.modelId, baseUrl: e.baseUrl ?? "", maxTokens: String(e.maxTokens) });
   };
 
   const saveTiers = async () => {
@@ -428,6 +437,16 @@ export default function ModelRegistryManager() {
                 <input className="ai-input" value={form.baseUrl} onChange={(ev) => setForm((f) => ({ ...f, baseUrl: ev.target.value }))} placeholder="http://100.81.60.55:8000/v1" />
               </div>
             )}
+            <div className="ai-field">
+              <label className="ai-label">最大トークン (出力上限)</label>
+              <input className="ai-input ai-input-small" type="number" min={1} max={1048576} value={form.maxTokens}
+                onChange={(ev) => setForm((f) => ({ ...f, maxTokens: ev.target.value }))} />
+              <div className="ai-hint">
+                {form.provider === "local_openai"
+                  ? "思考モデルは思考+回答で大きめに (例 32768)。サーバの -c 以下に。"
+                  : "hosted はモデルの非ストリーミング上限以下に (大きすぎると Anthropic は >10分 guard で失敗、OpenAI/Gemini は上限超過で 400)。既定 8192。"}
+              </div>
+            </div>
             {formErr && <div className="ai-warning">{formErr}</div>}
             <div className="ai-test-row">
               <button type="button" className="todo-add-btn" onClick={() => void submitForm()}>{editId ? "更新" : "追加"}</button>
@@ -435,7 +454,7 @@ export default function ModelRegistryManager() {
             </div>
           </div>
         ) : (
-          <button type="button" className="ai-edit-btn" onClick={() => { setAdding(true); setEditId(null); setManualModel(false); setForm({ label: "", provider: "anthropic", modelId: "", baseUrl: "" }); }}>
+          <button type="button" className="ai-edit-btn" onClick={() => { setAdding(true); setEditId(null); setManualModel(false); setForm({ label: "", provider: "anthropic", modelId: "", baseUrl: "", maxTokens: "8192" }); }}>
             + モデル追加
           </button>
         )}

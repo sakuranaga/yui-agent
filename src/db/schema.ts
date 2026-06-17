@@ -767,6 +767,7 @@ export const modelRegistry = pgTable(
     apiKeyRef: text("api_key_ref"),
     capabilities: jsonb("capabilities").$type<ModelCapabilities>().notNull().default({}),
     thinkingMode: text("thinking_mode").$type<ThinkingMode>().notNull().default("auto"),
+    maxTokens: integer("max_tokens").notNull().default(8192),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

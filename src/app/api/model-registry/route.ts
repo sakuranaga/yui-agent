@@ -10,6 +10,7 @@ import {
   listModels,
   createModel,
   sanitizeLocalBaseUrl,
+  validateMaxTokens,
   type ModelProvider,
 } from "@/lib/model-registry";
 import { clientError } from "@/lib/api-error";
@@ -28,7 +29,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  let body: { label?: string; provider?: string; modelId?: string; baseUrl?: string };
+  let body: { label?: string; provider?: string; modelId?: string; baseUrl?: string; maxTokens?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -42,6 +43,13 @@ export async function POST(req: NextRequest) {
   if (!label) return NextResponse.json({ error: "ラベルは必須です" }, { status: 400 });
   if (!PROVIDERS.includes(provider)) return NextResponse.json({ error: "provider が不正です" }, { status: 400 });
   if (!modelId) return NextResponse.json({ error: "モデル ID は必須です" }, { status: 400 });
+
+  let maxTokens: number | undefined;
+  if (body.maxTokens !== undefined) {
+    const v = validateMaxTokens(body.maxTokens);
+    if (!v.ok) return NextResponse.json({ error: v.error }, { status: 400 });
+    maxTokens = v.value;
+  }
 
   // local_openai は base_url 必須 + 軽量検証。hosted は base_url 不要。
   let baseUrl: string | null = null;
@@ -61,6 +69,7 @@ export async function POST(req: NextRequest) {
       modelId,
       baseUrl,
       apiKeyRef: provider === "local_openai" ? null : provider,
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
     });
     return NextResponse.json({ entry }, { status: 201 });
   } catch (e) {

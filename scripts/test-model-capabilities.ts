@@ -7,7 +7,7 @@
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { testModelCapabilities } from "@/lib/model-call";
+import { testModelCapabilities, callModelDirect } from "@/lib/model-call";
 import type { ModelEntry } from "@/lib/model-registry";
 import { callOpenAICompat } from "@/lib/llm-providers/openai";
 import { callGemini } from "@/lib/llm-providers/gemini";
@@ -36,6 +36,7 @@ function localEntry(baseUrl: string): ModelEntry {
     apiKeyRef: null,
     capabilities: {},
     thinkingMode: "auto",
+    maxTokens: 8192,
   };
 }
 
@@ -358,6 +359,43 @@ async function main() {
       stub({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }], usageMetadata: {} });
       await callGemini({ apiKey: "k", model: "m", maxTokens: 16, messages: [{ role: "user", content: "hi" }], temperature: 0.2 });
       check((captured.generationConfig as { temperature?: number })?.temperature === 0.2, "gemini: temperature が generationConfig に乗る");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  }
+
+  // --- 8. max_tokens の per-model 解決 (#206 §8.10) ---
+  console.log("[8] max_tokens per-model 解決");
+  {
+    const origFetch = globalThis.fetch;
+    let captured: Record<string, unknown> = {};
+    globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+      captured = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+      return { ok: true, status: 200, json: async () => ({ id: "x", model: "m", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: {} }), text: async () => "" } as Response;
+    }) as typeof fetch;
+    const mkEntry = (mt: number): ModelEntry => ({ id: "x", label: "x", provider: "local_openai", modelId: "m", baseUrl: "http://x/v1", apiKeyRef: null, capabilities: {}, thinkingMode: "auto", maxTokens: mt });
+    try {
+      // opts.maxTokens 指定 < entry.max → 指定値
+      await callModelDirect(mkEntry(1000), { messages: [{ role: "user", content: "hi" }], maxTokens: 500 });
+      check(captured.max_tokens === 500, "指定 500 < entry 1000 → 500");
+      // opts.maxTokens 指定 > entry.max → entry.max にキャップ
+      await callModelDirect(mkEntry(1000), { messages: [{ role: "user", content: "hi" }], maxTokens: 2000 });
+      check(captured.max_tokens === 1000, "指定 2000 > entry 1000 → 1000 (キャップ)");
+      // opts.maxTokens 未指定 → entry.max
+      await callModelDirect(mkEntry(1000), { messages: [{ role: "user", content: "hi" }] });
+      check(captured.max_tokens === 1000, "未指定 → entry.maxTokens (1000)");
+
+      // ceiling: reasoning model の floor が entry.max を超えない (callOpenAICompat 直接)
+      await callOpenAICompat({ apiKey: "k", baseUrl: "http://x/v1", model: "gpt-5.1", maxTokens: 300, tokenParamName: "max_completion_tokens", messages: [{ role: "user", content: "hi" }], maxTokensCeiling: 1000 });
+      check(captured.max_completion_tokens === 1000, "reasoning floor(2000) も ceiling 1000 で抑える");
+
+      // gemini: maxOutputTokens に乗る
+      globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+        captured = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }], usageMetadata: {} }), text: async () => "" } as Response;
+      }) as typeof fetch;
+      await callGemini({ apiKey: "k", model: "m", maxTokens: 1234, messages: [{ role: "user", content: "hi" }] });
+      check((captured.generationConfig as { maxOutputTokens?: number })?.maxOutputTokens === 1234, "gemini: maxOutputTokens に乗る");
     } finally {
       globalThis.fetch = origFetch;
     }

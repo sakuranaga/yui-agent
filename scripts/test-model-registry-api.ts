@@ -40,6 +40,7 @@ function entry(id: string, supportsTools: boolean | undefined): ModelEntry {
     id, label: id, provider: "anthropic", modelId: "m", baseUrl: null, apiKeyRef: "anthropic",
     capabilities: supportsTools === undefined ? {} : { supportsTools, reachable: true },
     thinkingMode: "auto",
+    maxTokens: 8192,
   };
 }
 
@@ -210,6 +211,17 @@ async function main() {
       const hr = await patchModelRoute(jsonReq("PATCH", { thinkingMode: "off" }), { params: Promise.resolve({ id: hosted.id }) });
       const hb = (await hr.json()) as { entry?: ModelEntry };
       check(hr.status === 200 && hb.entry?.thinkingMode === "auto", "hosted の thinkingMode は無視 (auto のまま)");
+
+      // maxTokens PATCH (§8.10)
+      const mtOk = await patchModelRoute(jsonReq("PATCH", { maxTokens: 32768 }), { params: Promise.resolve({ id: loc.id }) });
+      const mtb = (await mtOk.json()) as { entry?: ModelEntry };
+      check(mtOk.status === 200 && mtb.entry?.maxTokens === 32768, "maxTokens 32768 → 保存");
+      const mtBad = await patchModelRoute(jsonReq("PATCH", { maxTokens: 0 }), { params: Promise.resolve({ id: loc.id }) });
+      check(mtBad.status === 400, "maxTokens 0 → 400");
+      const mtBad2 = await patchModelRoute(jsonReq("PATCH", { maxTokens: 2000000 }), { params: Promise.resolve({ id: loc.id }) });
+      check(mtBad2.status === 400, "maxTokens 上限超過 → 400");
+      const mtBad3 = await patchModelRoute(jsonReq("PATCH", { maxTokens: 1.5 }), { params: Promise.resolve({ id: loc.id }) });
+      check(mtBad3.status === 400, "maxTokens 非整数 → 400");
     }
 
     console.log(`\n${passed} passed, ${failures.length} failed`);

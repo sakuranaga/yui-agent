@@ -484,6 +484,65 @@ thinking 制御 (M5 の `disableThinking` boolean、§8.9.3 で `enableThinking?
 
 ---
 
+## 8.10 max_tokens の per-entry 化 (グローバル env → モデル列)
+
+### 8.10.1 動機
+
+メイン生成の出力上限は `ANTHROPIC_MAX_TOKENS` env (既定 400) で一元管理していたが問題が露見:
+- **モデルごとに適正値が違う**: ローカル思考モデル (Qwen3.6) は思考+回答で **32768** 欲しい。Claude (hosted) は**非ストリーミング上限**があり 32768 を渡すと Anthropic SDK が「>10 分の可能性」で throw。OpenAI/Gemini も model 上限超過で 400。
+- 暫定で `callModelDirect` に `HOSTED_MAX_TOKENS_CAP=8192` のハックを入れたが、これは「hosted は一律 8192」で粗い。
+- env はコンテナ全体で 1 値。複数モデルを混在運用 (#206 の本旨) と相性が悪い。
+
+→ **max_tokens を model_registry の列にし、登録/編集時にモデル単位で設定**する。既定 8192。
+
+### 8.10.2 データモデル
+
+`model_registry` に **`max_tokens INTEGER NOT NULL DEFAULT 8192`** (migration **0071**)。
+- `CHECK (max_tokens > 0 AND max_tokens <= 1048576)` (壊れ値防止、上限は緩く)。
+- schema + `ModelEntry.maxTokens` + CRUD (create/update/PATCH/GET) に追加。
+
+### 8.10.3 解決ロジック
+
+`callModelDirect` で **entry.maxTokens を per-model 上限**として使う:
+
+```
+effective = opts.maxTokens != null ? min(opts.maxTokens, entry.maxTokens) : entry.maxTokens
+```
+
+- **呼び側が指定しない (メイン会話・jobs)** → `entry.maxTokens` をフル使用 (Qwen=32768 / Claude=8192 / 新規=8192)。
+- **呼び側が指定 (judge=200, extract=700 等の背景タスク)** → その値を使うが `entry.maxTokens` でキャップ (通常は小さいので影響なし)。
+- 既存の `HOSTED_MAX_TOKENS_CAP` (§直近の暫定修正) は**撤去** → entry.maxTokens に一本化。
+- `attemptWithEntry` は `opts.maxTokens` を**そのまま** (undefined 可) callModelDirect に渡す (1024 への既定化をやめる。default は entry.maxTokens 側で吸収)。
+- **OpenAI reasoning floor との整合 (Codex High)**: `callOpenAICompat` は reasoning model (gpt-5/o-series) で `Math.max(opts.maxTokens, 2000)` の floor をかけている。これが entry.maxTokens 上限を**再拡大で破る** (entry.maxTokens < 2000 の時)。→ `OpenAICompatOpts.maxTokensCeiling?` を追加し、`callModelDirect` が `entry.maxTokens` を ceiling として渡す。adapter は `effectiveTokens = Math.min(reasoning ? Math.max(opts.maxTokens, 2000) : opts.maxTokens, ceiling ?? Infinity)` で**ceiling を常に最後にかける**。これで floor も ceiling を超えない。
+
+### 8.10.4 呼び出し側の変更 (env 撤去)
+
+- `chat/route.ts`: メイン呼び出し (`callLlm("main", { maxTokens: MAX_TOKENS })`) の `maxTokens` を**外す** (= entry.maxTokens を使う)。`const MAX_TOKENS = env...` を削除。最終 completion 呼び (maxTokens:300) は据え置き (小さい固定値)。
+- `jobs/dispatcher.ts` (Codex Medium 修正): ここは `callLlm("voice", ...)` の**短い口頭報告**生成 (main 相当ではない)。`maxTokens` を**外すと entry.maxTokens=8192 まで許容され挙動が大きく変わる**ので、env `YUI_MAX_TOKENS` を**固定定数 (例 800)** に置換して残す (env は撤去、値は voice に十分な小さい固定値)。
+- `docker-compose.yml`: 直近で追加した `ANTHROPIC_MAX_TOKENS` エントリを**差し戻す** (未使用に)。`.env` の行は無害なので放置 (ドキュメントで「未使用」と注記してもよい)。
+- judge (200) 等の固定 maxTokens 呼びは据え置き。
+
+### 8.10.5 UI
+
+- 追加/編集フォームに「最大トークン (出力上限)」数値入力 (既定 8192)。
+- **validation は DB CHECK と揃える (Codex Low)**: API (POST/PATCH) も UI も `1 <= maxTokens <= 1048576` の正整数のみ受理。範囲外/非整数は 400 / UI でエラー。
+- **hosted の注意文 (Codex Low)**: フォーム近くに「hosted (Claude/OpenAI/Gemini) はモデルの非ストリーミング上限以下にすること (大きすぎると Anthropic は >10 分 guard で失敗、OpenAI/Gemini は上限超過で 400)」を表示。ローカルは server の `-c` に依存。
+
+### 8.10.6 挙動保存・移行
+
+- 既存 entry は migration default 8192。メイン=Claude なら 8192 (= 直近の HOSTED_CAP と同値、挙動同じ)。メイン=Qwen を使うなら**ユーザーが 32768 に設定**。
+- env を撤去するので、現状 `.env` の `ANTHROPIC_MAX_TOKENS=32768` は効かなくなる → Qwen を 32768 で使うには UI で entry.maxTokens=32768 を設定 (移行案内)。
+- 背景タスクの小 maxTokens は据え置き (挙動同じ)。
+
+### 8.10.7 テスト
+
+- callModelDirect: opts.maxTokens 指定 → min(指定, entry.max)、未指定 → entry.max (fetch stub で body の max_tokens / max_completion_tokens / maxOutputTokens を検証)。
+- hosted/local 双方で entry.maxTokens が効く。
+- CRUD: maxTokens 保存/取得、PATCH 更新、不正値 (0 / 負 / 超過) 弾く。
+- migration: default 8192。
+
+---
+
 ## 9. テスト
 
 - レジストリ CRUD + 移行 seed (既存値 → entry/割当の正しい変換)。

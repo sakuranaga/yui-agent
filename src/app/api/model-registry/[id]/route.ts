@@ -11,6 +11,7 @@ import {
   updateModel,
   deleteModel,
   sanitizeLocalBaseUrl,
+  validateMaxTokens,
   getTierAssignment,
   getTierFallback,
   getRoleTierOverrides,
@@ -26,7 +27,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const entry = await getModel(id);
     if (!entry) return NextResponse.json({ error: "モデルが見つかりません" }, { status: 404 });
 
-    let body: { label?: string; modelId?: string; baseUrl?: string; thinkingMode?: string };
+    let body: { label?: string; modelId?: string; baseUrl?: string; thinkingMode?: string; maxTokens?: unknown };
     try {
       body = (await req.json()) as typeof body;
     } catch {
@@ -39,7 +40,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       baseUrl?: string | null;
       capabilities?: Record<string, never>;
       thinkingMode?: "auto" | "on" | "off";
+      maxTokens?: number;
     } = {};
+
+    if (body.maxTokens !== undefined) {
+      const v = validateMaxTokens(body.maxTokens);
+      if (!v.ok) return NextResponse.json({ error: v.error }, { status: 400 });
+      patch.maxTokens = v.value;
+    }
     if (body.label !== undefined) {
       const label = body.label.trim();
       if (!label) return NextResponse.json({ error: "ラベルは空にできません" }, { status: 400 });

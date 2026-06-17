@@ -100,8 +100,8 @@ import {
   formatDiaryCompact,
 } from "@/lib/diary";
 
-// 主ターンモデルは lib/llm.ts の "main" role で解決 (env: ANTHROPIC_MODEL, default sonnet)
-const MAX_TOKENS = parseInt(process.env.ANTHROPIC_MAX_TOKENS ?? "400", 10);
+// 主ターンモデルは lib/llm.ts の "main" role で解決 (env: ANTHROPIC_MODEL, default sonnet)。
+// 出力上限はモデル別の entry.maxTokens (#206 §8.10) に委譲 (= main 呼びで maxTokens を渡さない)。
 const HISTORY_TURNS = parseInt(process.env.CHAT_HISTORY_TURNS ?? "8", 10);
 const RETRIEVAL_TOP_K = parseInt(process.env.RETRIEVAL_TOP_K ?? "5", 10);
 
@@ -797,7 +797,7 @@ async function handlePost(req: Request): Promise<Response> {
         console.log(sep);
       }
       response = await callLlm("main", {
-        maxTokens: MAX_TOKENS,
+        // maxTokens は渡さない → モデル別の entry.maxTokens を使う (#206 §8.10)
         system: systemBlocks,
         messages: apiMessages,
         ...(tools.length > 0 ? { tools } : {}),

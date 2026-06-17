@@ -230,7 +230,7 @@ async function main() {
     {
       const mk = (mode: "auto" | "on" | "off"): ModelEntry => ({
         id: "x", label: "x", provider: "local_openai", modelId: "m", baseUrl: "http://x/v1",
-        apiKeyRef: null, capabilities: {}, thinkingMode: mode,
+        apiKeyRef: null, capabilities: {}, thinkingMode: mode, maxTokens: 8192,
       });
       check(resolveEnableThinking(mk("off"), "main") === false, "off → false (tier 不問)");
       check(resolveEnableThinking(mk("off"), "sub") === false, "off → false (sub も)");

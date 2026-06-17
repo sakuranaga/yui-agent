@@ -97,6 +97,7 @@ function ephemeralEntry(modelId: string): ModelEntry {
     apiKeyRef: provider === "local_openai" ? null : provider,
     capabilities: {},
     thinkingMode: "auto",
+    maxTokens: 8192,
   };
 }
 
@@ -322,7 +323,8 @@ async function attemptWithEntry(
   tier: TierName,
   opts: CallLlmOpts
 ): Promise<Anthropic.Message> {
-  const maxTokens = opts.maxTokens ?? 1024;
+  // maxTokens は既定化しない (undefined のまま callModelDirect に渡す)。未指定なら
+  // callModelDirect が entry.maxTokens (per-model 上限、#206 §8.10) を使う。
   const retryEnabled = opts.retry !== false;
   const enableThinking = resolveEnableThinking(entry, tier);
   // local (= 自前ホスト) はコスト 0 で記録。PRICE 未知で Sonnet 単価に化けるのを防ぐ。
@@ -339,7 +341,7 @@ async function attemptWithEntry(
         system: opts.system,
         messages: opts.messages,
         tools: opts.tools,
-        maxTokens,
+        maxTokens: opts.maxTokens,
         temperature: opts.temperature,
         enableThinking,
       });

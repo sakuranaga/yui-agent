@@ -38,6 +38,9 @@ export type OpenAICompatOpts = {
   toolChoice?: "auto" | { name: string };
   /** sampling temperature (未指定なら API 既定)。 */
   temperature?: number;
+  /** 出力上限の hard ceiling (#206 §8.10)。reasoning model の floor (max_tokens を 2000 へ
+   *  引き上げ) が per-model 上限を超えないよう、最後にこの値で min をかける。 */
+  maxTokensCeiling?: number;
   /** ローカル thinking モデル (Gemma 3+/Qwen 3+ 等) の思考制御 (#206 §8.9)。
    *  false → chat_template_kwargs:{enable_thinking:false} (抑制)、true → {enable_thinking:true} (強制 ON)、
    *  undefined → 送らない (= サーバ既定)。OpenAI/Grok は未知フィールドで 400 になりうるので
@@ -316,7 +319,10 @@ export async function callOpenAICompat(opts: OpenAICompatOpts): Promise<Anthropi
   // Yui のデフォルト max=400 だと reasoning に食われて output 0 になるので、
   //   reasoning_effort: "minimal" (gpt-5) / "low" (o-series) で reasoning を抑制
   //   かつ最低 2000 token を確保して output 余地を残す。
-  const effectiveTokens = reasoning ? Math.max(opts.maxTokens, 2000) : opts.maxTokens;
+  //   ただし per-model 上限 (maxTokensCeiling、#206 §8.10) を最後に必ずかけて、floor が
+  //   entry.maxTokens を超えないようにする (entry.maxTokens < 2000 のケースの防御)。
+  const ceiling = opts.maxTokensCeiling ?? Infinity;
+  const effectiveTokens = Math.min(reasoning ? Math.max(opts.maxTokens, 2000) : opts.maxTokens, ceiling);
 
   const body: Record<string, unknown> = {
     model: opts.model,

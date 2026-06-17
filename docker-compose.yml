@@ -63,9 +63,6 @@ services:
       - EMBED_URL=${EMBED_URL:-}
       - EMBED_MODEL=${EMBED_MODEL:-bge-m3}
       - EMBED_DIMENSIONS=${EMBED_DIMENSIONS:-1024}
-      # メインチャットの出力上限。ローカル思考モデル (Qwen3.6 等、思考 ON) は
-      # 思考 + 回答で 400 を超えるため .env で引き上げる (既定 400 は Claude 想定)。
-      - ANTHROPIC_MAX_TOKENS=${ANTHROPIC_MAX_TOKENS:-400}
       - MORNING_CHECK_HOUR_JST=${MORNING_CHECK_HOUR_JST:-9}
       # Discord bot の session id を web 側にも渡す。
       # - 周期モジュールの「お便り」配信先 (findActiveSessionId) でこの session を

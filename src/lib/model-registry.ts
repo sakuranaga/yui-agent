@@ -33,6 +33,7 @@ export type ModelEntry = {
   apiKeyRef: string | null;
   capabilities: ModelCapabilities;
   thinkingMode: ThinkingMode;
+  maxTokens: number;
 };
 
 export type TierAssignment = Record<TierName, string | null>;
@@ -48,6 +49,7 @@ function rowToEntry(r: typeof modelRegistry.$inferSelect): ModelEntry {
     apiKeyRef: r.apiKeyRef,
     capabilities: r.capabilities ?? {},
     thinkingMode: r.thinkingMode ?? "auto",
+    maxTokens: r.maxTokens ?? 8192,
   };
 }
 
@@ -71,6 +73,7 @@ export async function createModel(input: {
   apiKeyRef?: string | null;
   capabilities?: ModelCapabilities;
   thinkingMode?: ThinkingMode;
+  maxTokens?: number;
 }): Promise<ModelEntry> {
   const id = randomUUID();
   const [row] = await db
@@ -84,6 +87,7 @@ export async function createModel(input: {
       apiKeyRef: input.apiKeyRef ?? null,
       capabilities: input.capabilities ?? {},
       thinkingMode: input.thinkingMode ?? "auto",
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
     })
     .returning();
   return rowToEntry(row);
@@ -99,6 +103,7 @@ export async function updateModel(
     apiKeyRef: string | null;
     capabilities: ModelCapabilities;
     thinkingMode: ThinkingMode;
+    maxTokens: number;
   }>
 ): Promise<ModelEntry | null> {
   const set: Record<string, unknown> = { updatedAt: new Date() };
@@ -109,6 +114,7 @@ export async function updateModel(
   if (patch.apiKeyRef !== undefined) set.apiKeyRef = patch.apiKeyRef;
   if (patch.capabilities !== undefined) set.capabilities = patch.capabilities;
   if (patch.thinkingMode !== undefined) set.thinkingMode = patch.thinkingMode;
+  if (patch.maxTokens !== undefined) set.maxTokens = patch.maxTokens;
   const [row] = await db
     .update(modelRegistry)
     .set(set)
@@ -209,6 +215,16 @@ export function sanitizeLocalBaseUrl(
   u.hash = "";
   u.search = "";
   return { ok: true, value: normalizeOpenAiBase(u.toString()) };
+}
+
+/** maxTokens の検証 (1..1048576 の正整数)。DB CHECK と揃える (#206 §8.10)。 */
+export function validateMaxTokens(
+  v: unknown
+): { ok: true; value: number } | { ok: false; error: string } {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 1048576) {
+    return { ok: false, error: "最大トークンは 1〜1048576 の整数です" };
+  }
+  return { ok: true, value: v };
 }
 
 /** provider → api_key_ref (= 暗号化済キーの参照名)。local は null。 */
