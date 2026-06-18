@@ -18,6 +18,8 @@ export const createTimerTool: ToolDef = {
   name: "create_timer",
   description:
     "タイマー (相対秒数カウントダウン) または アラーム (絶対時刻起動) を作成。" +
+    "**長さ (duration) / 起動時刻 (target_at) がユーザー発話・履歴から読み取れない場合は呼ばない** " +
+    "(既定値で埋めず、何分/何時か聞き返してから作る)。" +
     "kind='timer' は duration (数) + duration_unit ('seconds'|'minutes'|'hours') で長さを渡す。kind='alarm' は target_at (ISO8601)。" +
     "「5分」→ duration=5, duration_unit='minutes'。「30秒」→ duration=30, duration_unit='seconds'。「1時間」→ duration=1, duration_unit='hours'。秒換算は app がやるので**自分で掛け算しない**。" +
     "label は任意 (例: 'ラーメン', '会議', 'メール返信')。" +

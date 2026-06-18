@@ -40,6 +40,11 @@ import {
   type ExtraToolHandler,
 } from "@/lib/tools/executor";
 import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
+import {
+  NO_TOOL_NAME,
+  SELECT_TOOL_NAME,
+  SELECT_TOOL_DESCRIPTION,
+} from "@/lib/tools/dispatch-prompts";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
@@ -832,11 +837,12 @@ async function handlePost(req: Request): Promise<Response> {
     // v4 stage3 (docs/chat-executor-realign-v4.md): #1 の pick (select_tool 疑似ツール) 抽出。
     // #1 は発話(text)と一緒に select_tool で「この発話で使うべきツール」を1つ選ぶ。no_tool=雑談。
     // 現状は **shadow** = ログ + L2 判定のみで、#2 の prior には未注入 (挙動・並列は据え置き)。
-    const NO_TOOL_PICK = "no_tool";
+    // 名前/説明文は dispatch-prompts.ts に集約 (#2 の EXECUTOR_SYSTEM と同一ファイル)。
     const extractPicks = (m: Anthropic.Message): string[] =>
       m.content
         .filter(
-          (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === "select_tool",
+          (b): b is Anthropic.ToolUseBlock =>
+            b.type === "tool_use" && b.name === SELECT_TOOL_NAME,
         )
         .map((b) => {
           const n = (b.input as { tool_name?: unknown })?.tool_name;
@@ -1006,17 +1012,12 @@ async function handlePost(req: Request): Promise<Response> {
               new Set([
                 ...candidates.map((t) => t.name),
                 ...exposedSpecialistTools.map((t) => t.name),
-                NO_TOOL_PICK,
+                NO_TOOL_NAME,
               ]),
             );
             const selectTool: Anthropic.Tool = {
-              name: "select_tool",
-              description:
-                "この発話で行動 (検索/予定/タイマー/リマインダー/メール/音楽/メモ/TODO 等) が必要なら、" +
-                "最も適切なツールを 1 つ select_tool で選ぶ。複数領域に跨るなら複数回呼んでよい。" +
-                `行動が不要な雑談・相談・あいさつ・お礼等なら tool_name='${NO_TOOL_PICK}' を選ぶ。` +
-                "これは**選択であって実行ではない** (実行は別系統が行う)。" +
-                "発話本文では完了を断言しない (「やっておきますね」可、「やりました」不可)。",
+              name: SELECT_TOOL_NAME,
+              description: SELECT_TOOL_DESCRIPTION, // dispatch-prompts.ts に集約
               input_schema: {
                 type: "object",
                 properties: { tool_name: { type: "string", enum: pickNames } },
@@ -1101,7 +1102,7 @@ async function handlePost(req: Request): Promise<Response> {
     // v4 stage3: #1 の pick を抽出 (shadow)。pick != no_tool = #1 が「行動が要る」と判断。
     // 現状は L2 判定 + ログのみ (#2 prior には未注入)。複数 pick なら no_tool 以外が1つでもあれば行動。
     const picks = extractPicks(bResp);
-    const pickedAction = picks.some((p) => p !== NO_TOOL_PICK);
+    const pickedAction = picks.some((p) => p !== NO_TOOL_NAME);
     if (process.env.NODE_ENV !== "production" && picks.length > 0) {
       console.log(`[pick-shadow] #1 picks=[${picks.join(",")}] action=${pickedAction}`);
     }

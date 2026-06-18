@@ -14,7 +14,9 @@ export const gcalCreateEvent: ToolDef = {
   name: "gcal_create_event",
   description:
     "イベントを作成します。start/end は { dateTime: '2026-05-25T10:00:00+09:00', timeZone: 'Asia/Tokyo' } " +
-    "形式、または終日なら { date: '2026-05-25' }。",
+    "形式、または終日なら { date: '2026-05-25' }。" +
+    "**開始日時 (start) がユーザー発話・履歴から読み取れない場合は呼ばない** " +
+    "(現在時刻や既定で埋めない。日時を聞き返してから作る)。",
   input_schema: {
     type: "object",
     properties: {

@@ -229,6 +229,7 @@ Codex High① は「#1→#2 逐次は #1 を #2 実行の単一障害点にす�
 | #1 の pick が候補集合外 | 仕様上ありえない(#1 の tools = 候補集合)。万一は #2 が無視 |
 | timer / private mode | timer は #2 allowlist 維持。private は Valkey 履歴を送る(既存挙動踏襲) |
 | 複数領域(予定+TODO+メール) | #1 が複数 pick 可。#2 が複数 tool_use を並列実行(既存) |
+| 時刻が必須の依頼で時刻未指定(例「リマインダー入れて」だけ) | #1/#2 とも **no_tool**(現在時刻や既定で埋めて作らない)。#1 は本文で「いつ頃?」と聞き返す。reminder/timer/event 共通(EXECUTOR_SYSTEM + select_tool ガイダンス + 各 description)。実機: 時刻なしで現在時刻に作られ即発火、時刻指定で2件目が入る重複を防ぐ |
 
 ---
 
