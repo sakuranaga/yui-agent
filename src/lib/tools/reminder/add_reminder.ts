@@ -66,7 +66,10 @@ export const addReminderTool: ToolDef = {
   allowedModes: ["normal"],
   confirmationPolicy: "auto",
   // 重複ガード: 同 session・同発火タイミングで、title が類似なら再登録しない。
+  // 窓 24h: 会話履歴からの再実行は数時間後にも起きる (当日中の同一リマインダーを弾く)。
+  // anchor=絶対時刻なので別日の予定は別 anchor で許可される。cleanup 保持も 24h で整合。
   dedup: {
+    windowMinutes: 1440,
     scope: (_input, ctx) => `session:${ctx.sessionId}`,
     anchor: (input) => {
       const i = (input ?? {}) as Record<string, unknown>;

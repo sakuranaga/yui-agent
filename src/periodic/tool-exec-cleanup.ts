@@ -2,10 +2,14 @@
  * tool_execution_log の定期 cleanup ジョブ。1 時間ごと。
  * 設計: docs/tool-dedup-and-adding-tools.md (Part A)。
  *
- * (1) backstop: finalize 取りこぼし (handler/confirm 経路の異常終了、TTL 期限切れ等) で
- *     executing / pending_confirmation のまま残った 1h 超の行を failed / cancelled に倒す。
- *     dedup 窓 (10分) は超えているので機能影響は無いが、監査ステータスを正す。
- * (2) retention: dedup 窓を十分超えた行 (24h 超) は不要なので物理削除し table 肥大を防ぐ。
+ * (1) backstop: 放置された確認ダイアログ (pending_confirmation のまま 1h 超 = ユーザーが
+ *     クリックせず TTL 切れ) を cancelled に倒す → 再依頼を妨げない。
+ *     **executing は touch しない**: dedup 窓は 24h (reminder/calendar) で、executing が
+ *     「実行成功したが finalize 失敗で残留」のケースを 1h で failed に倒すと残り 23h の重複ガードが
+ *     抜ける。不確実な executing は「実行済み」側に倒す (mutation の重複を防ぐ安全側) のが正しく、
+ *     24h retention 削除に委ねる。
+ * (2) retention: dedup 窓を十分超えた行 (24h 超) は不要なので物理削除し table 肥大を防ぐ
+ *     (executing 残留も含めここで消える)。
  * LLM は呼ばない (skip 固定)。
  */
 import type { PeriodicModule, PeriodicContext, PeriodicResult } from "./types";
@@ -28,9 +32,8 @@ const toolExecCleanup: PeriodicModule = {
       const r1 = await sql<[{ count: string }]>`
         WITH updated AS (
           UPDATE tool_execution_log
-          SET status = CASE status WHEN 'executing' THEN 'failed' ELSE 'cancelled' END,
-              updated_at = now()
-          WHERE status IN ('executing','pending_confirmation')
+          SET status = 'cancelled', updated_at = now()
+          WHERE status = 'pending_confirmation'
             AND created_at < ${staleCutoff.toISOString()}::timestamptz
           RETURNING 1
         )

@@ -149,10 +149,20 @@ services:
   postgres:
     image: yui-agent-postgres:pg18
     container_name: yui-agent-postgres
+    # サーバ既定 TZ を JST に。timestamptz 比較 (絶対値) は不変だが、now() 表示や
+    # date_trunc/CURRENT_DATE 等の日付境界を JST 一貫にする。DB レベルは migration
+    # 0074 (ALTER DATABASE) でも設定 (managed Postgres 等 compose を使わない環境向け)。
+    command:
+      - postgres
+      - -c
+      - timezone=Asia/Tokyo
+      - -c
+      - log_timezone=Asia/Tokyo
     environment:
       - POSTGRES_USER=vroid
       - POSTGRES_PASSWORD=vroid
       - POSTGRES_DB=vroid
+      - TZ=Asia/Tokyo
     volumes:
       # PG18 はデータを /var/lib/postgresql 配下の版別サブディレクトリに置く
       # (docker-library/postgres #1259)。親をマウントする。

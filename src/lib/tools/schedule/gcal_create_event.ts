@@ -47,7 +47,9 @@ export const gcalCreateEvent: ToolDef = {
   availabilityKey: "google:calendar.events",
   isAvailable: isCalendarEvents,
   // 重複ガード: 同カレンダー・同開始時刻で、タイトルが類似 (文字違いの同一予定) なら再登録しない。
+  // 窓 24h: 会話履歴からの再実行は数時間後にも起きる (当日中の同一予定を弾く)。cleanup 保持も 24h で整合。
   dedup: {
+    windowMinutes: 1440,
     scope: (input) => {
       const i = (input ?? {}) as Record<string, unknown>;
       const cal = typeof i.calendar_id === "string" ? i.calendar_id : "primary";
