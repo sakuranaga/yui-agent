@@ -897,11 +897,29 @@ async function handlePost(req: Request): Promise<Response> {
     if (process.env.NODE_ENV !== "production") {
       console.log(`[executor-input] recentHistory=${recentHistory.length}件(user-only) last="${String(recentHistory[recentHistory.length - 1]?.content).slice(0, 30)}"`);
     }
+    // #2 (Executor) は履歴を user-only で受け取るため、「前ターンで実行済み」のシグナルが無く、
+    // 直近履歴に残る過去依頼 (例: コーラのリマインダー) を再実行しがち。直近 N 分の assistant 行の
+    // toolSummary (= そのターンで実行したツール) を runtimeFacts に明示し、再実行を抑止する (修正 A)。
+    const execNoteCutoffMs = Date.now() - HISTORY_WINDOW_MINUTES * 60_000;
+    const recentExecuted = messages
+      .map((m, idx) => ({ m, tsMs: m.createdAt ?? historyTimestamps[idx]?.getTime() }))
+      .filter(
+        ({ m, tsMs }) =>
+          m.role === "assistant" &&
+          !!m.toolSummary?.length &&
+          (tsMs === undefined || tsMs >= execNoteCutoffMs),
+      )
+      .flatMap(({ m }) => m.toolSummary!.map((t) => (t.brief ? `${t.name}(${t.brief})` : t.name)));
+    const executedNote =
+      recentExecuted.length > 0
+        ? `\n直近で実行済み (= 既に完了。同じ依頼を再実行/蒸し返さない): ${recentExecuted.join(", ")}`
+        : "";
+
     const runtimeFacts = [
       `現在時刻: ${chatTimestampMarker(new Date())}`,
       `mode: ${toolMode}`,
       `source: ${source}`,
-    ].join("\n");
+    ].join("\n") + executedNote;
 
     // ── specialist 橋渡し: #2 が ask_*_specialist を選んだら既存 judge + dispatchSpecialistJob へ ──
     // (specialist パイプライン = 独自モデル sub-agent + SSE/voice/pendingJobs は温存。書き換えない)
