@@ -9,6 +9,9 @@ import { useUserState, type UserState } from "@/lib/useUserState";
 type Message = {
   role: "user" | "assistant";
   content: string;
+  /** 作成時刻 (epoch ms)。履歴ロード時は history API の createdAt、新規発話は Date.now()。
+   *  /api/chat 送信時に per-message で載せ、executor の時間窓 + #1 時刻マーカーに使う。 */
+  createdAt?: number;
   imageUrls?: string[];  // 表示用 (data URL or /api/chat/image?...)。複数添付対応。
   /** assistant 行が実行した tool 呼び出しサマリ。LLM 履歴注入用、UI には出さない。 */
   toolSummary?: Array<{ name: string; brief: string }>;
@@ -613,6 +616,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
             attachments?: Array<{ filename: string; mediaType: string }>;
             toolSummary?: Array<{ name: string; brief: string }>;
             origin?: "raw" | "overlay-private" | "overlay-ephemeral";
+            createdAt?: string; // ISO8601 (history API が返す)
           }>;
         };
         if (cancelled) return;
@@ -621,12 +625,14 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
         const restored: Message[] = [];
         for (const m of data.messages) {
           const origin = m.origin ?? "raw";
+          // ISO → epoch ms。同一 message から分割した chunk は同じ createdAt を共有。
+          const createdAt = m.createdAt ? Date.parse(m.createdAt) || undefined : undefined;
           if (m.role === "assistant") {
             const chunks = splitForTTS(m.content);
             // tool_summary は分割された最後のチャンクに付ける (重複させない)
             const ts = m.toolSummary && m.toolSummary.length > 0 ? m.toolSummary : undefined;
             if (chunks.length === 0) {
-              restored.push({ role: "assistant", content: m.content, toolSummary: ts, origin });
+              restored.push({ role: "assistant", content: m.content, toolSummary: ts, origin, createdAt });
             } else {
               for (let i = 0; i < chunks.length; i++) {
                 restored.push({
@@ -634,6 +640,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
                   content: chunks[i],
                   toolSummary: i === chunks.length - 1 ? ts : undefined,
                   origin,
+                  createdAt,
                 });
               }
             }
@@ -652,6 +659,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
               content: stripped,
               imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
               origin,
+              createdAt,
             });
           }
         }
@@ -677,7 +685,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
     const greeting = "おかえりなさいませ、ご主人様。本日はどのようにお過ごしですか?";
     // mount 後 1 回限りの挨拶投入。greeted.current ガードがあるので cascading は無い。
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot mount greeting
-    setMessages([{ role: "assistant", content: greeting }]);
+    setMessages([{ role: "assistant", content: greeting, createdAt: Date.now() }]);
     // 挨拶は最初のユーザー操作前なので AudioContext がまだ resume できない。
     // TTSは諦めて、表情とリップシンクだけ短く動かす。
     const timer = setTimeout(() => {
@@ -905,6 +913,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
       ...chunks.map((c, i) => ({
         role: "assistant" as const,
         content: c,
+        createdAt: Date.now(),
         // tool_summary は最後のチャンクにだけ付与 (重複防止)
         ...(i === chunks.length - 1 && ts ? { toolSummary: ts } : {}),
         ...(origin ? { origin } : {}),
@@ -1148,6 +1157,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
     const userMsg: Message = {
       role: "user",
       content: userText,
+      createdAt: Date.now(),
       imageUrls: images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
       origin: isPrivateNow ? "overlay-private" : "raw",
     };
@@ -1163,19 +1173,21 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
     // 今回ターンの user msg だけ images を bundle して送る。
     const mergedHistory = mergeConsecutiveSameRole([
       ...contextMessages,
-      { role: "user", content: userText },
+      { role: "user", content: userText, createdAt: Date.now() },
     ]);
     const history: Array<{
       role: "user" | "assistant";
       content: string;
+      createdAt?: number;
       images?: Array<{ mediaType: string; data: string }>;
       toolSummary?: Array<{ name: string; brief: string }>;
     }> = mergedHistory.map((m, i) => {
       const base: {
         role: "user" | "assistant";
         content: string;
+        createdAt?: number;
         toolSummary?: Array<{ name: string; brief: string }>;
-      } = { role: m.role, content: m.content };
+      } = { role: m.role, content: m.content, createdAt: m.createdAt };
       if (m.role === "assistant" && m.toolSummary && m.toolSummary.length > 0) {
         base.toolSummary = m.toolSummary;
       }
@@ -1257,6 +1269,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
         {
           role: "assistant",
           content: `申し訳ございません、少し不調のようです。(${msg})`,
+          createdAt: Date.now(),
         },
       ]);
       onBotResponse("申し訳ございません", "sad");

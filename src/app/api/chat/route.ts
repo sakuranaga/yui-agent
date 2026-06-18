@@ -223,6 +223,10 @@ type ClientMessage = {
   images?: ClientImage[];
   /** 過去 assistant ターンで実行した tool 呼び出しサマリ (idempotency 補強用) */
   toolSummary?: Array<{ name: string; brief: string }>;
+  /** メッセージの作成時刻 (epoch ms)。client が history API の createdAt / 新規発話の Date.now()
+   *  を載せて送る。executor の時間窓 (古い依頼の再実行抑止) と #1 の時刻マーカーに使う。
+   *  未指定 (旧 client) はフォールバック (件数ベース / historyTimestamps)。 */
+  createdAt?: number;
 };
 
 const MAX_IMAGES_PER_TURN = 10;
@@ -401,6 +405,11 @@ async function handlePost(req: Request): Promise<Response> {
           role: m.role === "assistant" ? "assistant" : "user",
           content: m.content,
         };
+        // per-message タイムスタンプ (epoch ms)。有限な正の数だけ受け付ける。
+        const cAt = (m as { createdAt?: unknown }).createdAt;
+        if (typeof cAt === "number" && Number.isFinite(cAt) && cAt > 0) {
+          out.createdAt = cAt;
+        }
         // 画像は user メッセージのみ受け付ける。複数添付可 (MAX_IMAGES_PER_TURN まで)。
         // base64 が巨大すぎたら拒否 (resize 漏れ防止: 1 枚あたり ~6MB base64 ≒ 4.5MB バイナリ)
         const raw = (m as { images?: unknown }).images;
@@ -746,7 +755,10 @@ async function handlePost(req: Request): Promise<Response> {
     const apiMessages: Anthropic.MessageParam[] = messages.map((m, idx) => {
       const isCurrent = idx === messages.length - 1;
       // 履歴メッセージにだけ時刻マーカー。現在の user 入力には付けない (今が現在時刻)。
-      const ts = !isCurrent ? historyTimestamps[idx] : undefined;
+      // per-message createdAt を信頼源にし、無ければ historyTimestamps (position 対応) に
+      // フォールバック (assistant 単独行/merge で位置がズレうる旧経路、Codex 指摘の潜在バグ)。
+      const tsMs = !isCurrent ? (m.createdAt ?? historyTimestamps[idx]?.getTime()) : undefined;
+      const ts = tsMs !== undefined ? new Date(tsMs) : undefined;
       const stamp = ts ? `[${chatTimestampMarker(ts)}] ` : "";
       // 現在 user ターンの text にだけ runtime context (env/memory) を prepend。
       const userText = isCurrent ? injectRuntimeContext(m.content) : `${stamp}${m.content}`;
@@ -827,16 +839,32 @@ async function handlePost(req: Request): Promise<Response> {
     //   画像依存の tool 起動 (画像を見て検索/保存/予定化) は現状 #2 が判断できない (Codex 実装 Medium)。
     // 【後回し (ユーザー判断: specialist 機構の再設計時)】judge skip かつ #1 未回答時の C 起動連携 (Codex 実装 High①)。
     // RECENT_HISTORY_TURNS は executor.ts のレバー参照、テストで調整。
-    const RECENT_HISTORY_TURNS = 3;
-    // #2 (Executor) には **ユーザー発話 (= 依頼) のみ**を渡す。Yui の persona assistant turn
-    // を入れると、xLAM 等の function-calling 専用モデルが persona を模倣して「はい、タイマー
-    // かけましたよ」のような会話文を返し、ツールを選ばなくなる (実機で確認)。会話文脈
-    // (「じゃ予定入れて」等の照応) は過去のユーザー発話だけで足りる。§5.1 の trusted 履歴を
-    // user-only に絞る。
+    const RECENT_HISTORY_TURNS = 3; // 件数上限 (volume / コスト cap)
+    const HISTORY_WINDOW_MINUTES = 5; // 時間窓: これより古いユーザー発話は #2 に渡さない
+    const histCutoffMs = Date.now() - HISTORY_WINDOW_MINUTES * 60_000;
+    // #2 (Executor) には **過去 N 分以内のユーザー発話 (= 依頼) のみ**を最大 K 件渡す。
+    // - user-only: assistant turn を入れると xLAM 等が persona を模倣 (「はい、かけましたよ」) し
+    //   ツールを選ばなくなる (実機確認)。照応 (「じゃ予定入れて」) は過去ユーザー発話だけで足りる。
+    // - 時間窓: 固定件数だけだと会話が疎な時に数時間前の依頼が紛れ込み、#2 が**過去依頼を再実行**
+    //   する (実機: 「音楽かけて」で 3.5h 前の牛乳リマインダーが再作成された)。源を時間窓で絞り、
+    //   dedup (tool_execution_log) は安全網として残す二段構え。
+    // - timestamp 取得失敗 (ts undefined) は件数ベースにフォールバック (= 旧挙動、回帰なし)。
     const recentHistory: Anthropic.MessageParam[] = messages
-      .slice(-(RECENT_HISTORY_TURNS * 2))
-      .filter((m) => m.role !== "assistant")
-      .map((m) => ({
+      .map((m, idx) => ({
+        m,
+        // per-message createdAt を信頼源にする。旧 client 等で無ければ historyTimestamps に
+        // フォールバック (= position 対応、ズレうるが従来挙動)。両方無ければ undefined。
+        tsMs: m.createdAt ?? historyTimestamps[idx]?.getTime(),
+        isCurrent: idx === messages.length - 1,
+      }))
+      .filter(
+        ({ m, tsMs, isCurrent }) =>
+          !isCurrent && // 現在の発話は下で必ず末尾に付ける
+          m.role !== "assistant" &&
+          (tsMs === undefined || tsMs >= histCutoffMs) // 窓内 (ts 無しは含める = フォールバック)
+      )
+      .slice(-RECENT_HISTORY_TURNS)
+      .map(({ m }) => ({
         role: "user" as const,
         content: typeof m.content === "string" ? m.content : String(m.content ?? ""),
       }));
