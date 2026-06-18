@@ -989,6 +989,11 @@ async function handlePost(req: Request): Promise<Response> {
     // ── #1(発話, tools 無し) ∥ #2(Executor: ツール選択・実行) を並列起動 (v3) ──
     //   #2 は #1 を待たない・#1 の出力(ack)を使わない。tool_confirm_result mode は #2 を回さない。
     const runExec = !isToolConfirmMode && (registryTools.length > 0 || exposedSpecialistTools.length > 0);
+    // pick (select_tool) と L2 は **ユーザー発起ターン専用**。cron/timer/tool_confirm_result の
+    // system speak (song-change の曲紹介・お便り・発火 speak 等) では #1 に select_tool を付けない
+    // (素の #1 が発話を生成する。pick を付けると #1 が紹介文を返さず空 reply→502 になる実機バグ)。
+    const isUserTurn =
+      source !== "cron" && source !== "timer" && source !== "tool_confirm_result";
 
     // v4 stage1 (docs/chat-executor-realign-v4.md §8): retrieval を **共有の単一計算**に hoist。
     // 従来は #2 ブランチ内で実行していたが、後続 stage で #1 もこの候補集合を使うため前段の
@@ -1023,7 +1028,8 @@ async function handlePost(req: Request): Promise<Response> {
     const [bResp, exec] = await Promise.all([
       // #1 (発話 + pick shadow): 共有 retrieval 候補から select_tool で1つ pick (必ず no_tool 含む)。
       // pick は shadow = L2 判定とログのみ。#2 の prior には未注入なので並列・挙動は据え置き (stage3)。
-      runExec
+      // **ユーザー発起ターンのみ** select_tool を付ける。system speak (cron/timer) は素の #1 で発話生成。
+      runExec && isUserTurn
         ? (async () => {
             const candidates = await executorToolsPromise;
             const pickNames = Array.from(
@@ -1150,8 +1156,11 @@ async function handlePost(req: Request): Promise<Response> {
       // L2 安全網: 行動が期待されたのに #2 が 0 実行 → 必ず正直な C で報告 (docs §4.5)。
       // 主信号は #1 の pick (pickedAction)。#1 が pick を1つも出さなかった時のみ isActionIntent に
       // フォールバック (#1 が no_tool を選んだ=雑談なら isActionIntent は見ない → 誤報告を回避)。
+      // **ユーザー発起ターンのみ** (isUserTurn、上で定義)。cron/timer/tool_confirm_result の
+      // system speak (song-change の曲紹介等) は 0 実行が正常なので L2 を効かせない (実機: 曲紹介で謝罪が出た)。
       const noPick = picks.length === 0;
       const actionMissed =
+        isUserTurn &&
         exec.outcomes.length === 0 &&
         (pickedAction || (noPick && isActionIntent(currentUserMsg)));
       const { text: resultsText, needsC } = aggregateForReport(

@@ -195,6 +195,9 @@ Codex High① は「#1→#2 逐次は #1 を #2 実行の単一障害点にす�
 逆に **#1 が `no_tool` を選んだ** = 純粋会話とみなし C 不要(過剰報告防止)。
 - **L2 の対象は「#2 を走らせたが 0 実行」のケースのみ**(Codex Med①)。**#1 が error/timeout で #2 をそもそも
   走らせない場合は L2 対象外** — §3.1 通り既存エラー応答でターン失敗とし、mutation はしない(L2 でカバーしようとしない)。
+- **ユーザー発起ターンのみ** (source = web / discord)。**cron / timer / tool_confirm_result の system speak は対象外** —
+  song-change の「曲を紹介して」等は speak させるだけで 0 実行が正常なので、L2 が「できませんでした」と誤爆する
+  (実機: 曲紹介で謝罪が出た)。`isUserTurn = source !== cron/timer/tool_confirm_result` でゲート。
 - L1(§4.1-4.4)が効いても **別の capability gap で再発し得る** ため、L2 は独立の下限として必須。
 - **eval を追加**(§9): action / 雑談の代表セットで L2 の false positive / false negative を測ってから本番化。
 
