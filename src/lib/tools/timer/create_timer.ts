@@ -1,5 +1,18 @@
 import { createTimer } from "@/lib/timers";
+import { normalizeAnchorDateTime } from "../dedup-guard";
 import type { ToolDef } from "../types";
+
+const UNIT_FACTOR: Record<string, number> = { seconds: 1, minutes: 60, hours: 3600 };
+
+/** dedup anchor / handler 共通の秒換算 */
+function durationSecondsOf(i: Record<string, unknown>): number | undefined {
+  return typeof i.duration_seconds === "number"
+    ? i.duration_seconds
+    : typeof i.duration === "number"
+      ? i.duration *
+        (UNIT_FACTOR[typeof i.duration_unit === "string" ? i.duration_unit : "minutes"] ?? 60)
+      : undefined;
+}
 
 export const createTimerTool: ToolDef = {
   name: "create_timer",
@@ -44,6 +57,26 @@ export const createTimerTool: ToolDef = {
   domain: "timer",
   allowedModes: ["normal"],
   confirmationPolicy: "auto",
+  // 重複ガード: 同 session・同タイミング (timer=長さ / alarm=絶対時刻) で label が類似なら再作成しない。
+  dedup: {
+    scope: (_input, ctx) => `session:${ctx.sessionId}`,
+    anchor: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      if (i.kind === "alarm") {
+        const at = normalizeAnchorDateTime(
+          typeof i.target_at === "string" ? i.target_at : null,
+        );
+        return at ? `alarm:${at}` : null;
+      }
+      const secs = durationSecondsOf(i);
+      return secs != null ? `timer:${secs}` : null;
+    },
+    title: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      if (typeof i.label === "string" && i.label.trim()) return i.label;
+      return typeof i.on_fire_prompt === "string" ? i.on_fire_prompt : "";
+    },
+  },
   handler: async (input, ctx) => {
     const i = (input ?? {}) as {
       kind?: "timer" | "alarm";
@@ -56,15 +89,8 @@ export const createTimerTool: ToolDef = {
     };
     // 単位換算は app 側で。tool モデル (xLAM 等) には「数 (duration) + 単位 (duration_unit enum)」
     // で受けさせ ×60/×3600 を app がやる (xLAM は「40分」→ 秒換算を誤りやすいが enum 充填は得意)。
-    // 後方互換で duration_seconds 直指定も受ける (優先)。
-    const UNIT_FACTOR: Record<string, number> = { seconds: 1, minutes: 60, hours: 3600 };
-    const durationSeconds =
-      typeof i.duration_seconds === "number"
-        ? i.duration_seconds
-        : typeof i.duration === "number"
-          ? i.duration *
-            (UNIT_FACTOR[typeof i.duration_unit === "string" ? i.duration_unit : "minutes"] ?? 60)
-          : undefined;
+    // 後方互換で duration_seconds 直指定も受ける (優先)。dedup anchor と同じ換算を共有。
+    const durationSeconds = durationSecondsOf(i);
     const row = await createTimer({
       sessionId: ctx.sessionId,
       kind: i.kind ?? "timer",

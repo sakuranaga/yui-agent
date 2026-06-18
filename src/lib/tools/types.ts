@@ -91,6 +91,24 @@ export type ToolDef = {
   // 省略時は resolveDispatch が surface / confirmationPolicy から推定。
   // 部分指定で推定値を上書き (例: 外部サービス mutate を report に倒す)。
   dispatch?: Partial<ToolDispatch>;
+
+  // ── 重複実行ガード (docs/tool-dedup-and-adding-tools.md) ──
+  // mutation/外部送信で**再実行が害になる**ツールに付与 (省略 = ガード対象外)。
+  // 会話ターンをまたぐ重複 (例: 過去依頼の再実行・文字違いの同一予定) を runTool 共通層で防ぐ。
+  dedup?: {
+    /** dedup スコープ (実体単位。例: `calendar:<id>`, `session:<id>`) */
+    scope: (input: unknown, ctx: ToolContext) => string;
+    /** 時間軸の正規化キー (null=anchor 無し → title 類似のみで判定) */
+    anchor: (input: unknown) => string | null;
+    /** embedding する title テキスト */
+    title: (input: unknown) => string;
+    /** cosine 閾値 (既定 0.85) */
+    threshold?: number;
+    /** 時間窓 (分、既定 10) */
+    windowMinutes?: number;
+    /** anchor 無しツールの補助 lexical キー (todo 等) */
+    lexicalKey?: (input: unknown) => string;
+  };
 };
 
 /** runTool が ToolResult を作るために使う */

@@ -1,4 +1,5 @@
 import { createReminder } from "@/lib/reminders";
+import { normalizeAnchorDateTime } from "../dedup-guard";
 import type { ToolDef } from "../types";
 
 export const addReminderTool: ToolDef = {
@@ -64,6 +65,36 @@ export const addReminderTool: ToolDef = {
   domain: "reminder",
   allowedModes: ["normal"],
   confirmationPolicy: "auto",
+  // 重複ガード: 同 session・同発火タイミングで、title が類似なら再登録しない。
+  dedup: {
+    scope: (_input, ctx) => `session:${ctx.sessionId}`,
+    anchor: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      // lead_minutes / ref_todo_id まで含める (同じ予定の「開始時」と「10分前」、
+      // 別 TODO 紐付きの同名 reminder を別物として扱う、A6)。
+      const lead = typeof i.lead_minutes === "number" ? i.lead_minutes : 0;
+      const ref = typeof i.ref_todo_id === "number" ? String(i.ref_todo_id) : "";
+      let timing: string | null;
+      if (i.schedule_kind === "weekly") {
+        const wd = Array.isArray(i.weekdays)
+          ? [...(i.weekdays as number[])].sort((a, b) => a - b).join(",")
+          : "";
+        const t = typeof i.base_time === "string" ? i.base_time : "";
+        timing = `weekly:${t}:${wd}`;
+      } else {
+        timing = normalizeAnchorDateTime(
+          typeof i.base_at === "string" ? i.base_at : null,
+        );
+        if (timing) timing = `once:${timing}`;
+      }
+      if (!timing) return null;
+      return `${timing}|${lead}|${ref}`;
+    },
+    title: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      return typeof i.title === "string" ? i.title : "";
+    },
+  },
   handler: async (input, ctx) => {
     const i = (input ?? {}) as {
       kind?: "habit" | "todo_due" | "event_due" | "custom";

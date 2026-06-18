@@ -130,6 +130,9 @@ export function aggregateForReport(
     const { executionState, disposition, skipReason } = outcome;
     if (executionState === "skipped") {
       if (skipReason === "budget" || skipReason === "depth") skippedByLimit = true;
+      // 重複ガードでスキップした時は「既にあるので追加しなかった」を1回だけ報告 (A7)。
+      else if (skipReason === "dedup_recent_execution")
+        lines.push(`- [重複スキップ] ${toolName}: 直近に同じ内容を実行済みのため、新規には登録していません。`);
       continue;
     }
     if (executionState === "executed" && disposition === "silent") continue;

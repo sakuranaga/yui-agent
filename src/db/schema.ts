@@ -1414,3 +1414,31 @@ export type ToolIndexRow = typeof toolIndex.$inferSelect;
 export type NewToolIndexRow = typeof toolIndex.$inferInsert;
 export type ToolIndexMeta = typeof toolIndexMeta.$inferSelect;
 export type NewToolIndexMeta = typeof toolIndexMeta.$inferInsert;
+
+/**
+ * ツール重複実行ガードの実行ログ (reservation)。設計: docs/tool-dedup-and-adding-tools.md。
+ *
+ * mutation/外部送信の実行を runTool 共通層で記録し、会話ターンをまたぐ重複 (過去依頼の再実行・
+ * 文字違いの同一予定) を防ぐ。判定: 同 scope+tool+anchor を時間窓で粗絞り → title embedding 類似で精査。
+ * status で auto 実行中(executing)/confirm 待ち(pending_confirmation)/完了(executed) を区別し race と
+ * 確認待ち重複を防ぐ。confirm_token で executePendingTool と紐付け。HNSW は不要 (候補集合が小)。
+ */
+export const toolExecutionLog = pgTable("tool_execution_log", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  scopeKey: text("scope_key").notNull(), // 実体単位 (calendar:<id> / session:<id>)
+  toolName: text("tool_name").notNull(),
+  dedupAnchor: text("dedup_anchor").notNull(), // null は '__null__' に正規化
+  titleText: text("title_text").notNull().default(""),
+  titleEmbedding: vector("title_embedding", { dimensions: 1024 }), // dedup 対象は予約時に毎回 set
+  embeddingModel: text("embedding_model"), // 異モデルのベクトル比較を防ぐ
+  embeddingDimensions: integer("embedding_dimensions"),
+  status: text("status")
+    .notNull()
+    .$type<"executing" | "pending_confirmation" | "executed" | "skipped" | "failed" | "cancelled">(),
+  confirmToken: text("confirm_token"), // confirm 経路の reservation を executePendingTool と紐付け (unique)
+  args: jsonb("args").$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type ToolExecutionLogRow = typeof toolExecutionLog.$inferSelect;
+export type NewToolExecutionLogRow = typeof toolExecutionLog.$inferInsert;

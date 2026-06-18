@@ -23,6 +23,7 @@ import type {
   ToolMode,
 } from "./types";
 import { ALL_TOOLS } from "./registry";
+import { finalizeReservationByToken } from "./dedup-guard";
 
 const CONFIRM_TTL_SEC = 600; // 10 分
 
@@ -125,6 +126,8 @@ export async function applyConfirmDecision(
 
   // denied は ここで SSE push + 内部 chat 再 turn まで完了 (= Yui「やめておきます」)
   if (decision === "denied") {
+    // dedup reservation を解放 (cancelled → 再依頼を妨げない)。
+    await finalizeReservationByToken(token, "cancelled");
     await removeFromSessionIndex(p.sessionId, token);
     pushToSession(p.sessionId, {
       type: "tool_confirm_result",
@@ -160,6 +163,8 @@ async function markFailed(token: string, reason: string): Promise<void> {
   p.status = "failed";
   p.failReason = reason;
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
+  // dedup reservation を解放 (failed → 再試行を妨げない)。
+  await finalizeReservationByToken(token, "failed");
   await removeFromSessionIndex(p.sessionId, token);
   pushToSession(p.sessionId, {
     type: "tool_confirm_result",
@@ -187,6 +192,8 @@ async function markExecuted(token: string, result: unknown): Promise<void> {
   p.status = "executed";
   p.result = result;
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
+  // dedup reservation を確定 (executed)。
+  await finalizeReservationByToken(token, "executed");
   await removeFromSessionIndex(p.sessionId, token);
   pushToSession(p.sessionId, {
     type: "tool_confirm_result",

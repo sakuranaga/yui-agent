@@ -15,6 +15,11 @@ import type {
 import { ALL_TOOLS } from "./registry";
 import { wrapUntrusted, buildUntrustedContentGuard } from "./untrusted-wrap";
 import { requestUserConfirm, buildConfirmGuard } from "./confirm";
+import {
+  dedupCheckAndReserve,
+  finalizeReservation,
+  setReservationConfirmToken,
+} from "./dedup-guard";
 
 function callerMatches(declared: ToolCaller, actual: ToolCaller): boolean {
   if (declared.kind !== actual.kind) return false;
@@ -168,6 +173,32 @@ function errorResult(toolUseId: string, msg: string): Anthropic.ToolResultBlockP
   };
 }
 
+/** dedup 重複でスキップした時の tool_result。C (speak) が「既に同じ内容を実行済み」と報告する。 */
+function dedupSkipResult(toolUseId: string, toolName: string): Anthropic.ToolResultBlockParam {
+  return {
+    type: "tool_result",
+    tool_use_id: toolUseId,
+    content: JSON.stringify({
+      duplicate_skipped: true,
+      tool_name: toolName,
+      message:
+        "直近に同じ内容を実行済みのため、重複登録を避けてスキップしました。新規には登録していません。",
+    }),
+  };
+}
+
+/** dispatch が dedup スキップを executionState=skipped に振り分けるための判定 (content マーカー)。 */
+export function isDedupSkipResult(result: Anthropic.ToolResultBlockParam): boolean {
+  if (result.is_error) return false;
+  const c = result.content;
+  if (typeof c !== "string") return false;
+  try {
+    return (JSON.parse(c) as { duplicate_skipped?: unknown }).duplicate_skipped === true;
+  } catch {
+    return false;
+  }
+}
+
 /** untrusted ラップに同梱する _meta (= 例: web_fetch の URL) を抜き出す */
 function extractUntrustedMeta(tool: ToolDef, input: unknown): Record<string, unknown> | undefined {
   const i = (input ?? {}) as Record<string, unknown>;
@@ -191,6 +222,10 @@ export async function runTool(
     tool.confirmationPolicy === "confirm_destructive" ||
     tool.confirmationPolicy === "confirm_external_send"
   ) {
+    // dedup: 確認ダイアログを出す前に重複チェック (reservation = pending_confirmation)。
+    const ded = await dedupCheckAndReserve(tool, tu.input, ctx, "pending_confirmation");
+    if (ded?.duplicate) return dedupSkipResult(tu.id, tool.name);
+
     const summary = buildToolSummary(tool, tu.input);
     const res = await requestUserConfirm({
       sessionId: ctx.sessionId,
@@ -202,11 +237,15 @@ export async function runTool(
       confirmationPolicy: tool.confirmationPolicy,
     });
     if ("error" in res) {
+      // 確認を作れなかった → reservation を解放 (failed)。
+      if (ded) await finalizeReservation(ded.reservationId, "failed");
       return errorResult(
         tu.id,
         "another confirmation is already pending in this session; ask user to resolve it first"
       );
     }
+    // reservation に confirm_token を紐付け (executePendingTool が承認/拒否時に確定)。
+    if (ded) await setReservationConfirmToken(ded.reservationId, res.token);
     return {
       type: "tool_result",
       tool_use_id: tu.id,
@@ -221,8 +260,12 @@ export async function runTool(
   }
 
   // 2. handler 実行 (= "auto" policy のみここまで到達)
+  // dedup: handler 実行前に重複チェック (reservation = executing)。
+  const ded = await dedupCheckAndReserve(tool, tu.input, ctx, "executing");
+  if (ded?.duplicate) return dedupSkipResult(tu.id, tool.name);
   try {
     const raw = await tool.handler(tu.input, ctx);
+    if (ded) await finalizeReservation(ded.reservationId, "executed");
     if (tool.untrustedOutput) {
       const meta = extractUntrustedMeta(tool, tu.input);
       return {
@@ -239,6 +282,7 @@ export async function runTool(
       content: JSON.stringify(raw),
     };
   } catch (e) {
+    if (ded) await finalizeReservation(ded.reservationId, "failed");
     return errorResult(tu.id, e instanceof Error ? e.message : String(e));
   }
 }

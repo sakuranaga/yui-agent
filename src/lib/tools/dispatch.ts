@@ -11,7 +11,7 @@
  */
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ToolDef, ToolContext, ToolDisposition } from "./types";
-import { runTool, resolveDispatch } from "./runtime";
+import { runTool, resolveDispatch, isDedupSkipResult } from "./runtime";
 
 export type ExecutionState = "executed" | "pending_confirmation" | "skipped" | "failed";
 
@@ -19,8 +19,8 @@ export type DispatchOutcome = {
   executionState: ExecutionState;
   disposition: ToolDisposition;
   result: Anthropic.ToolResultBlockParam;
-  /** skipped の理由 (ログ・デバッグ用) */
-  skipReason?: "budget" | "duplicate" | "depth";
+  /** skipped の理由 (ログ・デバッグ用)。dedup_recent_execution = ターンをまたぐ重複ガード。 */
+  skipReason?: "budget" | "duplicate" | "depth" | "dedup_recent_execution";
 };
 
 /**
@@ -149,6 +149,13 @@ export async function dispatchTool(
         is_error: true,
       },
     };
+  }
+
+  // dedup スキップ: runTool が重複でスキップした (confirm/auto 両経路、handler 未実行)。
+  // confirmationPolicy 判定より先に振り分ける (confirm tool が「確認待ち」と誤報告されるのを防ぐ)。
+  if (isDedupSkipResult(result)) {
+    if (guarded) ledger.executedMutations.delete(key); // 実行していない → ターン内予約を解除
+    return { ...base, executionState: "skipped", result, skipReason: "dedup_recent_execution" };
   }
 
   // executionState 判定 (confirmationPolicy ベース。content パースに依存しない)

@@ -15,6 +15,7 @@ import memoryCleanup from "./memory-cleanup";
 import mailPoll from "./mail-poll";
 import profileSnapshot from "./profile-snapshot";
 import reminderDispatch from "./reminder-dispatch";
+import toolExecCleanup from "./tool-exec-cleanup";
 
 export const PERIODIC_MODULES: PeriodicModule[] = [
   calendarCheck,
@@ -26,6 +27,7 @@ export const PERIODIC_MODULES: PeriodicModule[] = [
   mailPoll,
   profileSnapshot,
   reminderDispatch,
+  toolExecCleanup,
   // 将来:
   // todoDigest,     // 期限近い todos / state 滞留 todos の通知
 ];
