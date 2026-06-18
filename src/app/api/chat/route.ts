@@ -950,36 +950,43 @@ async function handlePost(req: Request): Promise<Response> {
     // ── #1(発話, tools 無し) ∥ #2(Executor: ツール選択・実行) を並列起動 (v3) ──
     //   #2 は #1 を待たない・#1 の出力(ack)を使わない。tool_confirm_result mode は #2 を回さない。
     const runExec = !isToolConfirmMode && (registryTools.length > 0 || exposedSpecialistTools.length > 0);
+
+    // v4 stage1 (docs/chat-executor-realign-v4.md §8): retrieval を **共有の単一計算**に hoist。
+    // 従来は #2 ブランチ内で実行していたが、後続 stage で #1 もこの候補集合を使うため前段の
+    // 単一 promise にする。ここでは **#1 と並列に開始し #2 が await** するだけなので、挙動も
+    // レイテンシも不変 (#1 の critical path に retrieval は乗らない)。本格的な逐次化 (#1 が pick
+    // のため retrieval を待つ) は stage4。失敗 / full-catalog / 候補空は registryTools のまま (安全側)。
+    // specialist umbrella (exposedSpecialistTools) は retrieval 対象外で常に全件渡す (削らない = 安全)。
+    const executorToolsPromise: Promise<typeof registryTools> = (async () => {
+      if (!runExec || registryTools.length === 0) return registryTools;
+      let executorTools = registryTools;
+      try {
+        const retrieval = await retrieveToolCandidates({
+          query: currentUserMsg,
+          permitted: registryTools,
+        });
+        if (retrieval.mode !== "full-catalog") {
+          const candidateSet = new Set(retrieval.toolNames);
+          const filtered = registryTools.filter((t) => candidateSet.has(t.name));
+          if (filtered.length > 0) executorTools = filtered;
+        }
+        if (process.env.NODE_ENV !== "production") {
+          console.log(
+            `[tool-retrieval] mode=${retrieval.mode} ${registryTools.length}→${executorTools.length} q="${currentUserMsg.slice(0, 30)}"`,
+          );
+        }
+      } catch (e) {
+        console.warn("[tool-retrieval] 失敗 → 全ツールで継続:", e);
+      }
+      return executorTools;
+    })();
+
     const [bResp, exec] = await Promise.all([
       callLlm("main", { system: systemBlocks, messages: apiMessages }), // #1
       runExec
         ? (async () => {
-            // #2 直前に直ツール候補をベクトル+lexical 検索で絞る (§12.2)。#1 と並列なので
-            // 発話(#1) の critical path にレイテンシは乗らない。query=trusted な最新発話。
-            // 失敗 / 候補空 / full-catalog mode は registryTools をそのまま使う (= 安全側)。
-            // specialist umbrella (exposedSpecialistTools) は retrieval 対象外で常に全件渡す
-            // (削られない = 安全。multi-tool で specialist が要るケースは将来 tool_index に統合)。
-            let executorTools = registryTools;
-            if (registryTools.length > 0) {
-              try {
-                const retrieval = await retrieveToolCandidates({
-                  query: currentUserMsg,
-                  permitted: registryTools,
-                });
-                if (retrieval.mode !== "full-catalog") {
-                  const candidateSet = new Set(retrieval.toolNames);
-                  const filtered = registryTools.filter((t) => candidateSet.has(t.name));
-                  if (filtered.length > 0) executorTools = filtered;
-                }
-                if (process.env.NODE_ENV !== "production") {
-                  console.log(
-                    `[tool-retrieval] mode=${retrieval.mode} ${registryTools.length}→${executorTools.length} q="${currentUserMsg.slice(0, 30)}"`,
-                  );
-                }
-              } catch (e) {
-                console.warn("[tool-retrieval] 失敗 → 全ツールで継続:", e);
-              }
-            }
+            // 共有 retrieval (前段で #1 と並列に開始済み) の結果を await。
+            const executorTools = await executorToolsPromise;
             // executor が **既知の function-calling 専用モデル (xLAM 等)** なら single-pass で回す
             // (tool_result を含む 2 回目を呼ばない = multi-turn 非対応の 500/無駄呼び出しを回避)。
             // provider 全体 (local_openai) で判定すると multi-turn 可能なローカルモデルの依存チェーンを
