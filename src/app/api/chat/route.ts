@@ -829,6 +829,21 @@ async function handlePost(req: Request): Promise<Response> {
         .join("")
         .trim();
 
+    // v4 stage3 (docs/chat-executor-realign-v4.md): #1 の pick (select_tool 疑似ツール) 抽出。
+    // #1 は発話(text)と一緒に select_tool で「この発話で使うべきツール」を1つ選ぶ。no_tool=雑談。
+    // 現状は **shadow** = ログ + L2 判定のみで、#2 の prior には未注入 (挙動・並列は据え置き)。
+    const NO_TOOL_PICK = "no_tool";
+    const extractPicks = (m: Anthropic.Message): string[] =>
+      m.content
+        .filter(
+          (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === "select_tool",
+        )
+        .map((b) => {
+          const n = (b.input as { tool_name?: unknown })?.tool_name;
+          return typeof n === "string" ? n : "";
+        })
+        .filter((n) => n.length > 0);
+
     // #2 (Executor) に渡す入力 (v3、§4.0)。trusted/untrusted 分離:
     //   - 履歴は **生の `messages`** (= env/memory 注入前) を text のみで渡す → 検索結果/メール/記憶が
     //     #2 のツール起動材料にならない (apiMessages を生で渡さない、Codex v3 High①)。
@@ -982,7 +997,39 @@ async function handlePost(req: Request): Promise<Response> {
     })();
 
     const [bResp, exec] = await Promise.all([
-      callLlm("main", { system: systemBlocks, messages: apiMessages }), // #1
+      // #1 (発話 + pick shadow): 共有 retrieval 候補から select_tool で1つ pick (必ず no_tool 含む)。
+      // pick は shadow = L2 判定とログのみ。#2 の prior には未注入なので並列・挙動は据え置き (stage3)。
+      runExec
+        ? (async () => {
+            const candidates = await executorToolsPromise;
+            const pickNames = Array.from(
+              new Set([
+                ...candidates.map((t) => t.name),
+                ...exposedSpecialistTools.map((t) => t.name),
+                NO_TOOL_PICK,
+              ]),
+            );
+            const selectTool: Anthropic.Tool = {
+              name: "select_tool",
+              description:
+                "この発話で行動 (検索/予定/タイマー/リマインダー/メール/音楽/メモ/TODO 等) が必要なら、" +
+                "最も適切なツールを 1 つ select_tool で選ぶ。複数領域に跨るなら複数回呼んでよい。" +
+                `行動が不要な雑談・相談・あいさつ・お礼等なら tool_name='${NO_TOOL_PICK}' を選ぶ。` +
+                "これは**選択であって実行ではない** (実行は別系統が行う)。" +
+                "発話本文では完了を断言しない (「やっておきますね」可、「やりました」不可)。",
+              input_schema: {
+                type: "object",
+                properties: { tool_name: { type: "string", enum: pickNames } },
+                required: ["tool_name"],
+              },
+            };
+            return callLlm("main", {
+              system: systemBlocks,
+              messages: apiMessages,
+              tools: [selectTool],
+            });
+          })()
+        : callLlm("main", { system: systemBlocks, messages: apiMessages }), // #1 (pick 無し: confirm mode 等)
       runExec
         ? (async () => {
             // 共有 retrieval (前段で #1 と並列に開始済み) の結果を await。
@@ -1028,8 +1075,16 @@ async function handlePost(req: Request): Promise<Response> {
             // 再試行は「**何も実行されなかった**」時のみ。multi-turn (Haiku 等) は成功しても
             // 最終 iteration が no_tool_calls で終わるため、stopReason で判定すると「実行済みなのに
             // 再試行 → 二重実行」になる (実機: カレンダー予定が 2 回作成)。outcomes 空で判定する。
+            // declined (#2 が no_tool を明示選択 = 行動不要と判断) は再試行しない。full で
+            // 無理に拾わせると decline を覆して誤実行/再実行になる。no_tool_calls (拾えなかった)
+            // のみ narrowing miss を疑って再試行する。
             const narrowed = executorTools.length < registryTools.length;
-            if (narrowed && result.outcomes.length === 0 && isActionIntent(currentUserMsg)) {
+            if (
+              narrowed &&
+              result.outcomes.length === 0 &&
+              result.stopReason !== "declined" &&
+              isActionIntent(currentUserMsg)
+            ) {
               if (process.env.NODE_ENV !== "production") {
                 console.log("[tool-retrieval] no_tool_calls + action-intent → full catalog 再試行");
               }
@@ -1041,7 +1096,20 @@ async function handlePost(req: Request): Promise<Response> {
     ]);
     accUsage(bResp);
     response = bResp;
-    const ackText = textOf(bResp);
+    let ackText = textOf(bResp);
+
+    // v4 stage3: #1 の pick を抽出 (shadow)。pick != no_tool = #1 が「行動が要る」と判断。
+    // 現状は L2 判定 + ログのみ (#2 prior には未注入)。複数 pick なら no_tool 以外が1つでもあれば行動。
+    const picks = extractPicks(bResp);
+    const pickedAction = picks.some((p) => p !== NO_TOOL_PICK);
+    if (process.env.NODE_ENV !== "production" && picks.length > 0) {
+      console.log(`[pick-shadow] #1 picks=[${picks.join(",")}] action=${pickedAction}`);
+    }
+    // #1 が text 無しで select_tool のみ返した場合の固定 ack 補完 (空 reply での 502 を防ぐ、設計 §4.2)。
+    if (!ackText && picks.length > 0) {
+      ackText = pickedAction ? "はい、対応しますね。" : "はい。";
+      console.warn(`[chat] #1 returned no text (picks=[${picks.join(",")}]) → 固定 ack 補完`);
+    }
     if (ackText) accumulatedTexts.push(ackText);
     let finalIterText = ackText;
 
@@ -1060,7 +1128,18 @@ async function handlePost(req: Request): Promise<Response> {
       }
 
       // ── C: report/失敗/pending/打ち切り があれば結果を踏まえて報告 (tools 無し) ──
-      const { text: resultsText, needsC } = aggregateForReport(exec.outcomes, exec.stopReason);
+      // L2 安全網: 行動が期待されたのに #2 が 0 実行 → 必ず正直な C で報告 (docs §4.5)。
+      // 主信号は #1 の pick (pickedAction)。#1 が pick を1つも出さなかった時のみ isActionIntent に
+      // フォールバック (#1 が no_tool を選んだ=雑談なら isActionIntent は見ない → 誤報告を回避)。
+      const noPick = picks.length === 0;
+      const actionMissed =
+        exec.outcomes.length === 0 &&
+        (pickedAction || (noPick && isActionIntent(currentUserMsg)));
+      const { text: resultsText, needsC } = aggregateForReport(
+        exec.outcomes,
+        exec.stopReason,
+        actionMissed,
+      );
       if (needsC) {
         const cSystem: Anthropic.TextBlockParam[] = [
           ...systemBlocks,

@@ -63,12 +63,25 @@ export type ExecutorOutcome = {
 
 export type ExecutorStopReason =
   | "no_tool_calls"
+  | "declined" // #2 が no_tool を明示選択 = 行動不要と判断 (雑談 / 既処理 / 過去履歴の蒸し返し)
   | "max_iter"
   | "no_progress"
   | "budget"
   | "pending_confirmation"
   | "single_pass" // single-pass executor (xLAM 等): 1 回目のツールを実行したら再ループしない
   | "llm_error"; // 再呼び出し (mini-loop 2 回目以降) で LLM がエラー → 既存結果で graceful 終了 (backstop)
+
+/** #2 が明示的に「行動不要」を選ぶための疑似ツール名。#1 の select_tool の no_tool 値とも一致。 */
+export const NO_TOOL_NAME = "no_tool";
+
+const NO_TOOL_DEF: Anthropic.Tool = {
+  name: NO_TOOL_NAME,
+  description:
+    "この発話に**新しい行動 (ツール実行) が不要**な時に選ぶ。雑談・相談・お礼・あいさつ、" +
+    "または依頼が既に処理済み/過去履歴の蒸し返しで再実行すべきでない場合。" +
+    "これを選ぶと何も実行されない。迷ったら実行より no_tool を優先 (誤実行・再実行を避ける)。",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+};
 
 export type ExecutorRunResult = {
   outcomes: ExecutorOutcome[];
@@ -88,7 +101,9 @@ export const EXECUTOR_SYSTEM = `あなたはツール実行プランナーです
 
 # 厳守
 - 出力はツール呼び出しのみ。説明文・自然文・相槌を本文に書かない。
-- 雑談・質問への回答で完結し行動が不要なら、ツールを一切呼ばずに終了する。
+- 雑談・質問への回答で完結し行動が不要なら、**no_tool を選ぶ** (空応答でなく明示的に no_tool)。
+  最新の依頼が既に処理済み、または過去履歴の蒸し返しで再実行すべきでない場合も no_tool。
+  迷ったら実行より no_tool を優先 (誤実行・過去依頼の再実行を避ける)。
 - ツールが必要なら、**会話履歴から対象・条件・数値を読み取って**正確な引数を組む
   (例「明日昼に散歩」→…→「じゃ予定入れて」なら、履歴から「明日昼・散歩」を補って予定作成)。
 - 依存関係は順に解決する (例: add_todo の戻り id を add_reminder の ref_todo_id に渡す)。
@@ -122,7 +137,10 @@ function resultToText(r: Anthropic.ToolResultBlockParam): string {
  */
 export function aggregateForReport(
   outcomes: ExecutorOutcome[],
-  stopReason: ExecutorStopReason
+  stopReason: ExecutorStopReason,
+  /** L2 安全網: 行動が期待された (= #1 が action を pick) のに 0 実行だった時 true。
+   *  正直な「できなかった」報告を C で出すため、強制的に report 行を立てる (docs §4.5)。 */
+  actionMissed = false,
 ): { text: string; needsC: boolean } {
   const lines: string[] = [];
   let skippedByLimit = false;
@@ -150,6 +168,12 @@ export function aggregateForReport(
   // (single-pass executor は single_pass で終わり llm_error にはならないので注記対象外)。
   if (stopReason === "llm_error") {
     lines.push(`- [注意] ツール選択モデルが途中で応答できず、続きのツールを実行できませんでした。全部は完了していない可能性があります。`);
+  }
+  // L2 安全網: 行動が期待されたのに 0 実行 → 沈黙させず正直に報告 (docs §4.5)。
+  if (actionMissed && outcomes.length === 0) {
+    lines.push(
+      `- [未実行] 依頼された操作が実行されませんでした。完了とは言わず、できなかった旨 (対象を特定できない/該当機能が無い等) を正直に1文で伝える。`,
+    );
   }
   return { text: lines.join("\n"), needsC: lines.length > 0 };
 }
@@ -232,7 +256,9 @@ export async function runExecutor(opts: {
   // registry 名と衝突する extra tool は除外 (LLM へ同名重複を渡さない、Codex P3 Low)。registry 優先。
   const safeExtra = (opts.extraTools ?? []).filter((t) => !toolByName.has(t.name));
   const extraNames = new Set(safeExtra.map((t) => t.name));
-  const anthropicTools = [...toAnthropicTools(tools), ...safeExtra];
+  // no_tool を明示選択肢として末尾に追加 (#2 が「行動不要」を能動的に declension できる。
+  // 空応答 no_tool_calls より信頼でき、過去履歴の蒸し返し再実行も能動的に断れる。設計 §4.4)。
+  const anthropicTools = [...toAnthropicTools(tools), ...safeExtra, NO_TOOL_DEF];
   const seenExtra = new Set<string>(); // extra tool (specialist) の二重 dispatch 抑止
 
   // 直近履歴をそのまま #2 の会話文脈として渡す。mini-loop で tool_use/tool_result を追記する。
@@ -263,14 +289,21 @@ export async function runExecutor(opts: {
     if (toolUses.length === 0) {
       return { outcomes, iterations, stopReason: "no_tool_calls" };
     }
+    // no_tool (明示 declension): 実ツールが無ければ「行動不要」と判断したので clean stop。
+    // 実ツールと混在時は no_tool を捨てて実ツールだけ処理する (no_tool は履歴にも積まない =
+    // tool_result 不要)。
+    const realToolUses = toolUses.filter((tu) => tu.name !== NO_TOOL_NAME);
+    if (realToolUses.length === 0) {
+      return { outcomes, iterations, stopReason: "declined" };
+    }
     // Executor の text は破棄し、**tool_use block のみ**を履歴へ積む (模倣汚染防止、Codex P2b Medium)。
-    messages.push({ role: "assistant", content: toolUses });
+    messages.push({ role: "assistant", content: realToolUses });
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     let anyProgress = false;
     let budgetHit = false;
     let anyPending = false;
-    for (const tu of toolUses) {
+    for (const tu of realToolUses) {
       const tool = toolByName.get(tu.name);
       if (!tool) {
         // specialist umbrella (extra tool) → onExtraTool で既存 dispatchSpecialistJob へ橋渡し (§5.4.1)。

@@ -67,7 +67,7 @@
 | #1 の tools | 無し(どんなモデルでも可) | pick 専用疑似ツール `select_tool`(候補=topK∪umbrella を列挙)+ `no_tool`。発話と pick を同時返却 |
 | retrieval | #2 ブランチ内(#1 の critical path から隠す) | **共有前段**(embed 1 回、#1/#2 両方が見る) |
 | #2 への prior | 無し | **#1 の pick を leading candidate**(強い推奨だが #2 が再検証、raw スコアは渡さない) |
-| 空振り時の報告 | C は outcomes>0 のみ | **#2 が 0 実行 && (pick≠no_tool ∨ action-intent ∨ 再試行) → 必ず C(L2)** |
+| 空振り時の報告 | C は outcomes>0 のみ | **#2 が 0 実行 && (pickedAction ∨ (pick欠落 ∧ action-intent)) → 必ず C(L2)** |
 
 逐列化のコストは embed ~40-100ms(§1.3)。ユーザー承認済み(~100ms 許容)。
 
@@ -92,7 +92,7 @@
  │     → 再検証込みで最終ツール決定 → dispatchTool / specialist / multi-turn 実行
  │
  └─ C (main): aggregateForReport(outcomes, stopReason)
-       needsC または **#2が0実行 && (pick≠no_tool ∨ action-intent ∨ #2再試行発火)** → 結果/失敗を 1〜2 文で正直に報告
+       needsC または **#2が0実行 && (pickedAction ∨ (pick欠落 ∧ action-intent))** → 結果/失敗を 1〜2 文で正直に報告
 ```
 
 `#2 は #1 完了後` = #1 の `text + select_tool` を待ってから起動(上限は #1 の既存 LLM コールタイムアウト、§3.1)。「並列」は
@@ -168,22 +168,31 @@ Codex High① は「#1→#2 逐次は #1 を #2 実行の単一障害点にす�
 
 - #2 の tools = **実行ツール** 共有 topK ∪ umbrella ∪ `{no_tool}`。#1 は同じ候補集合を**疑似ツールで pick**するので
   (§4.2)、#1 の pick 先は #2 の実行ツール集合に**必ず含まれる**(名前で対応)。
-- `EXECUTOR_SYSTEM` に「leading candidate の扱い」を追記: **prior があれば再検証(最新発話 grounding / schema 充足 /
+- **`no_tool` を #2 の明示選択肢に**(実装済 stage3): #2 が「行動不要」を能動的に declension できる。空応答
+  (`no_tool_calls`)より信頼でき、**過去履歴の蒸し返し再実行も能動的に断れる**(再実行抑止)。
+  - #2 が `no_tool` のみ選択 → `stopReason="declined"`(0 実行で clean stop)。実ツールと混在時は no_tool を捨てて実ツールを処理。
+  - `EXECUTOR_SYSTEM`: 「行動不要・既処理・過去履歴の蒸し返しなら no_tool。迷ったら実行より no_tool 優先」。
+  - **declined は narrowed→full 再試行をしない**(#2 の decline を full で覆して誤実行/再実行にしない。`no_tool_calls` のみ再試行)。
+- `EXECUTOR_SYSTEM` に「leading candidate の扱い」を追記(stage4): **prior があれば再検証(最新発話 grounding / schema 充足 /
   confirmation / specialist 適合)した上で、採用/不採用とその理由をログ**。無条件採用にはしない(§4.3)。
 - 既存レバー(single-pass / user-only 履歴 / runtime facts)は維持。
 
-### 4.5 L2 安全網: 行動が期待されたのに 0実行 → 必ず C (Codex Med① で複合化)
+### 4.5 L2 安全網: 行動が期待されたのに 0実行 → 必ず C
 
-`isActionIntent` 単独はヒューリスティックで、誤検知(雑談に C)/検知漏れ(語彙外依頼で沈黙)の両方を起こす。
-**単一信号に依存させず複合ゲート**にする。`exec.outcomes.length === 0` のとき、以下の**いずれか**が立てば
-C を強制起動して正直報告(「対象を特定できず実行できませんでした」等):
+`isActionIntent`(regex)単独は **保守的 gate** として広めに作られており(`して`/`教え`/`ほしい` 等を含む)、
+**L2 に使うと雑談を誤検知**して「できませんでした」と誤報告する。雑談 vs 行動の分類は **regex ではなく
+#1 の pick が高精度にやる**(#1=Sonnet が候補 + `no_tool` から選ぶ)。これが本質的な「雑談フィルタ」。
 
-- **主信号: `#1 の pick != no_tool`**(高能力モデルが「行動が要る」と判断したのに 0 実行 = 最も信頼できる
-  「期待された行動が起きなかった」シグナル)。
-- 補助: `isActionIntent(currentUserMsg)` が真。
-- 補助: #2 の narrowed→full-catalog 再試行が発火した(= action 寄りと既に判定済み)。
+`exec.outcomes.length === 0` のとき、C を強制起動して正直報告:
 
-逆に **#1 が `no_tool` かつ `!isActionIntent` かつ再試行も無し** = 純粋会話とみなし C 不要(過剰報告防止)。
+- **主信号: `#1 の pick が no_tool 以外を含む`(pickedAction)** — #1 が「行動が要る」と判断したのに 0 実行
+  = 最も信頼できる「期待された行動が起きなかった」シグナル。
+- **フォールバック: `#1 が pick を1つも出さなかった (pick 欠落) かつ isActionIntent`** — #1 が無応答 pick の
+  時だけ regex に頼る(§3.1 の prior absent ケース)。**#1 が明示的に `no_tool` を選んだ時は isActionIntent を
+  見ない**(雑談と確定しているので誤報告を避ける)。
+
+→ 実装: `0実行 && (pickedAction ∨ (pick欠落 ∧ isActionIntent))`。
+逆に **#1 が `no_tool` を選んだ** = 純粋会話とみなし C 不要(過剰報告防止)。
 - **L2 の対象は「#2 を走らせたが 0 実行」のケースのみ**(Codex Med①)。**#1 が error/timeout で #2 をそもそも
   走らせない場合は L2 対象外** — §3.1 通り既存エラー応答でターン失敗とし、mutation はしない(L2 でカバーしようとしない)。
 - L1(§4.1-4.4)が効いても **別の capability gap で再発し得る** ため、L2 は独立の下限として必須。
@@ -205,7 +214,7 @@ C を強制起動して正直報告(「対象を特定できず実行できま�
 
 1. **#1 は完了を断言しない**(意図のみ)。完了/結果の言明は **C のみ**が、実 outcomes に基づいて行う。
 2. **行動が期待されたターンは必ず C で締める**(成功・失敗・0実行のいずれも)。判定は複合ゲート
-   `0実行 && (pick≠no_tool ∨ action-intent ∨ #2再試行発火)`(§4.5)。「別途届く」の約束を破らない。
+   `0実行 && (pickedAction ∨ (pick欠落 ∧ action-intent))`(§4.5)。「別途届く」の約束を破らない。
 3. #1 の pick は **seed であって実行確定ではない**。実行可否は #2 が判断。
 
 ---
@@ -226,14 +235,14 @@ C を強制起動して正直報告(「対象を特定できず実行できま�
 ## 8. ロールアウト
 
 - フィーチャフラグ(env or ai_setting)で v3(並列)/ v4(逐次+pick)を切替可能にし、退行時に即戻せるようにする。
-- 段階(Codex Med③ で安全な順に再編 — **L2 を先に、#1 pick は shadow から**):
-  1. **共有 retrieval 前段化** + #2 互換(retrieval を #1 前に移すだけ、挙動不変)。
-  2. **L2 安全網を先行投入**(#1 がまだ tools 無しでも「action なのに 0 実行 → 正直 C」を先に効かせる。
-     desync の被害を実装の最初に止める)。
-  3. **#1 pick を shadow**(#1 に select_tool 疑似ツールを付与。pick は **#2 の prior には未注入**だが、
-     **L2 の主信号としては使う**(`pick≠no_tool && 0実行 → C`)。これで中間状態でも「#1 が行動を期待→0実行」を
-     L2 が拾えて desync は悪化しない。pick 精度・#2 結果の一致率を実測してから (4) へ)。
-  4. **#2 への prior 有効化**(逐次化 + leading candidate 注入)。shadow データで精度を確認してから。
+- 段階:
+  1. ✅ **共有 retrieval 前段化** + #2 互換(retrieval を #1 前に移すだけ、挙動不変)。— commit 8c4e07c
+  2+3. ✅ **#1 pick (shadow) + #2 の no_tool + L2 を一体で投入**(当初 stage2 は isActionIntent だけの弱い L2
+     を先行する案だったが、その regex は雑談を誤検知するため、**雑談 vs 行動の分類器そのものである #1/#2 の
+     `no_tool` pick と同時に**入れた。pick は **#2 の prior には未注入(shadow)**で並列・挙動は据え置き、
+     **L2 の主信号としてのみ使う**。#2 の `no_tool`(declined)は再実行抑止にも効く)。
+  4. **#2 への prior 有効化**(逐次化 + leading candidate 注入)。shadow データで pick 精度を確認してから。
+- フィーチャフラグ(env or ai_setting)で v3 / v4 を切替可能にし退行時に即戻せるように(stage4 で逐次化する際に重要)。
 - 各段で Codex レビュー + 実機確認。
 
 ---
