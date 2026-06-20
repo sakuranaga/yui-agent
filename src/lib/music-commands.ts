@@ -129,7 +129,8 @@ export function setNowPlaying(np: NowPlaying | null): void {
       globalThis.__vroidMusicNowPlaying = np;
       return;
     }
-    if (!isSame) {
+    const isActuallyPlaying = np.isPlaying !== false;
+    if (!isSame && isActuallyPlaying) {
       const ctx = globalThis.__vroidMusicContext ?? null;
       const entry: TrackHistoryEntry = {
         timestamp: Date.now(),
@@ -162,6 +163,11 @@ export function setNowPlaying(np: NowPlaying | null): void {
           console.warn("[song-change] notify failed:", e)
         );
       }
+    } else if (!isSame && !isActuallyPlaying && process.env.NODE_ENV !== "production") {
+      console.log("[song-change] track changed while paused → cache only, no intro", {
+        title: np.title,
+        id: np.id,
+      });
     }
   }
   globalThis.__vroidMusicNowPlaying = np;
