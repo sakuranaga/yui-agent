@@ -48,6 +48,13 @@ const STANDALONE_DIRECTIVE_RE = new RegExp(`(?:<\\/?(?:${DIRECTIVE_NAMES})[^>]*>
  */
 const TEXT_TOOLCALL_RE = /\[[a-z][a-z0-9_]*\([^\]]*\)\]\s*/g;
 
+/**
+ * 過去 assistant turn の toolSummary を履歴へ注入していた内部ログ表記。
+ * これはモデル向け idempotency シグナルで、ユーザー向け本文には絶対に出さない。
+ */
+const INTERNAL_EXECUTION_LOG_RE =
+  /\s*\[(?:内部実行ログ|internal execution log)\s*[—-]\s*[^\]]*\]\s*/gi;
+
 export function sanitizeAssistantText(text: string): string {
   if (!text) return text;
   return text
@@ -56,6 +63,7 @@ export function sanitizeAssistantText(text: string): string {
     .replace(PAIRED_DIRECTIVE_RE, "")
     .replace(STANDALONE_DIRECTIVE_RE, "")
     .replace(TEXT_TOOLCALL_RE, "")
+    .replace(INTERNAL_EXECUTION_LOG_RE, "\n")
     .trimStart()
     .trimEnd();
 }

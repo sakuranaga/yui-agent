@@ -10,6 +10,7 @@ import { rawMessages } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { readOverlay, clearOverlay } from "@/lib/conversation-overlay";
 import { clientError } from "@/lib/api-error";
+import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -63,7 +64,7 @@ export async function GET(req: NextRequest) {
     };
     const dbMerged: Merged[] = rows.reverse().map((r) => ({
       role: r.role,
-      content: r.content,
+      content: r.role === "assistant" ? sanitizeAssistantText(r.content) : r.content,
       attachments: r.attachments ?? undefined,
       toolSummary: r.toolSummary ?? undefined,
       createdAt: r.createdAt.toISOString(),
@@ -76,7 +77,7 @@ export async function GET(req: NextRequest) {
       const overlay = await readOverlay(session);
       overlayMerged = overlay.map((e) => ({
         role: e.role,
-        content: e.content,
+        content: e.role === "assistant" ? sanitizeAssistantText(e.content) : e.content,
         toolSummary: e.toolSummary,
         createdAt: new Date(e.ts).toISOString(),
         ts: e.ts,

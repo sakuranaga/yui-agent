@@ -234,6 +234,22 @@ type ClientMessage = {
   createdAt?: number;
 };
 
+function buildPendingJobAck(
+  jobs: Array<{ jobId: number; specialist: string }>,
+  userText: string,
+): string {
+  const specialists = new Set(jobs.map((j) => j.specialist));
+  if (specialists.has("schedule")) {
+    if (/明日.*(予定|スケジュール|カレンダー)|(予定|スケジュール|カレンダー).*明日/.test(userText)) {
+      return "あら、明日のご予定ですね。お調べしますので、少しお待ちください。";
+    }
+    return "ご予定をお調べしますので、少しお待ちください。";
+  }
+  if (specialists.has("mail")) return "メールを確認しますので、少しお待ちください。";
+  if (specialists.has("research")) return "お調べしますので、少しお待ちください。";
+  return "確認しますので、少しお待ちください。";
+}
+
 const MAX_IMAGES_PER_TURN = 10;
 
 /**
@@ -442,8 +458,8 @@ async function handlePost(req: Request): Promise<Response> {
           if (accepted.length > 0) out.images = accepted;
         }
         // assistant 行の toolSummary: 過去ターンで Yui が実行した tool の履歴。
-        // apiMessages 構築時に assistant content 末尾へ "(内部実行ログ: ...)" として注入し、
-        // Sonnet に重複 dispatch を抑止させる。
+        // これは Executor の runtimeFacts にだけ渡し、通常の会話本文には混ぜない。
+        // 会話本文に混ぜると local LLM が内部ログを復唱し、raw_messages に永続化される。
         const ts = (m as { toolSummary?: unknown }).toolSummary;
         if (out.role === "assistant" && Array.isArray(ts)) {
           const cleaned: Array<{ name: string; brief: string }> = [];
@@ -787,17 +803,6 @@ async function handlePost(req: Request): Promise<Response> {
             })),
             { type: "text" as const, text: userText },
           ],
-        };
-      }
-      // assistant 行に過去 tool 実行履歴があれば末尾に注入。
-      // Sonnet が「あ、この操作は前ターンで完了済みだから再実行不要」と判断できる。
-      if (m.role === "assistant" && m.toolSummary && m.toolSummary.length > 0) {
-        const log = m.toolSummary
-          .map((t) => (t.brief ? `${t.name}(${t.brief})` : t.name))
-          .join(", ");
-        return {
-          role: "assistant" as const,
-          content: `${stamp}${m.content}\n\n[内部実行ログ — 完了済みにつき再実行不要: ${log}]`,
         };
       }
       return { role: m.role, content: userText };
@@ -1216,6 +1221,9 @@ async function handlePost(req: Request): Promise<Response> {
     // finalIterText は B→Executor→C フローで設定済み (C があれば C、無ければ B の ack)。
     // 空ならループ全体の累積 (= B の ack) を使う。
     let reply = finalIterText;
+    if (pendingJobs.length > 0 && toolCallCount > 0) {
+      reply = buildPendingJobAck(pendingJobs, currentUserMsg);
+    }
     if (!reply && accumulatedTexts.length > 0) {
       reply = accumulatedTexts.join("\n").trim();
     }

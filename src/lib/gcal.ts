@@ -11,6 +11,7 @@
 import { getAccessTokenForMcp, googleCloudProject } from "./google-oauth";
 
 const CAL_BASE = "https://www.googleapis.com/calendar/v3";
+const OVERLAP_LOOKBACK_DAYS = 60;
 
 function isConfigured(): boolean {
   return !!process.env.GOOGLE_CLIENT_ID && !!process.env.GOOGLE_CLIENT_SECRET;
@@ -143,6 +144,9 @@ export async function listEvents(opts: {
   orderBy?: "startTime" | "updated";
 }): Promise<CalEvent[]> {
   const singleEvents = opts.singleEvents ?? true; // 通常 true (繰返しを展開)
+  // Google Calendar API の timeMin 境界だけに頼ると、開始日が検索期間より前の
+  // 複数日予定を取りこぼすことがある。少し前から取得し、下で「期間に重なる」予定に絞る。
+  const overlapWindow = buildOverlapWindow(opts.timeMin, opts.timeMax);
 
   // calendarId 未指定 → 表示中の全カレンダー横断
   if (!opts.calendarId) {
@@ -151,10 +155,15 @@ export async function listEvents(opts: {
     const visible = cals.filter((c) => c.selected !== false);
     if (visible.length === 0) return [];
     const perCalMax = Math.max(5, Math.ceil((opts.maxResults ?? 20) / visible.length));
+    const fetchMax = overlapWindow ? Math.max(perCalMax, 250) : perCalMax;
     const results = await Promise.all(
       visible.map(async (c) => {
         try {
-          const items = await fetchEventsFor(c.id, { ...opts, maxResults: perCalMax }, singleEvents);
+          const items = await fetchEventsFor(
+            c.id,
+            { ...opts, timeMin: overlapWindow?.fetchTimeMin ?? opts.timeMin, maxResults: fetchMax },
+            singleEvents,
+          );
           return items.map((e) => ({ ...e, calendarId: c.id, calendarSummary: c.summary }));
         } catch (err) {
           console.warn(`[gcal] listEvents on ${c.id} failed:`, err instanceof Error ? err.message : err);
@@ -163,13 +172,26 @@ export async function listEvents(opts: {
       })
     );
     // 開始時刻で時系列 sort、上限まで切る
-    const merged = results.flat();
+    const merged = overlapWindow
+      ? results.flat().filter((e) => eventOverlaps(e, overlapWindow.minMs, overlapWindow.maxMs))
+      : results.flat();
     merged.sort((a, b) => extractStartMs(a) - extractStartMs(b));
     const limit = opts.maxResults ?? 20;
     return merged.slice(0, limit);
   }
 
-  return fetchEventsFor(opts.calendarId, opts, singleEvents);
+  const items = await fetchEventsFor(
+    opts.calendarId,
+    overlapWindow
+      ? { ...opts, timeMin: overlapWindow.fetchTimeMin, maxResults: Math.max(opts.maxResults ?? 20, 250) }
+      : opts,
+    singleEvents,
+  );
+  return overlapWindow
+    ? items
+      .filter((e) => eventOverlaps(e, overlapWindow.minMs, overlapWindow.maxMs))
+      .slice(0, opts.maxResults ?? 20)
+    : items;
 }
 
 async function fetchEventsFor(
@@ -204,6 +226,41 @@ function extractStartMs(e: CalEvent): number {
   if (!s) return 0;
   const t = new Date(s).getTime();
   return Number.isFinite(t) ? t : 0;
+}
+
+function buildOverlapWindow(timeMin?: string, timeMax?: string): {
+  minMs: number;
+  maxMs: number;
+  fetchTimeMin: string;
+} | null {
+  if (!timeMin || !timeMax) return null;
+  const minMs = Date.parse(timeMin);
+  const maxMs = Date.parse(timeMax);
+  if (!Number.isFinite(minMs) || !Number.isFinite(maxMs) || minMs >= maxMs) return null;
+  return {
+    minMs,
+    maxMs,
+    fetchTimeMin: new Date(minMs - OVERLAP_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+  };
+}
+
+function calTimeMs(t: CalEventTime | undefined, fallback: number): number {
+  if (!t) return fallback;
+  if (t.dateTime) {
+    const ms = Date.parse(t.dateTime);
+    return Number.isFinite(ms) ? ms : fallback;
+  }
+  if (t.date) {
+    const ms = Date.parse(`${t.date}T00:00:00+09:00`);
+    return Number.isFinite(ms) ? ms : fallback;
+  }
+  return fallback;
+}
+
+function eventOverlaps(e: CalEvent, minMs: number, maxMs: number): boolean {
+  const startMs = calTimeMs(e.start, minMs);
+  const endMs = calTimeMs(e.end, startMs);
+  return startMs < maxMs && endMs > minMs;
 }
 
 export async function getEvent(opts: {

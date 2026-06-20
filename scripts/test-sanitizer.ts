@@ -46,5 +46,12 @@ function check(c: boolean, m: string) { if (c) pass++; else { fail++; console.lo
   const inp = "ふふっ（笑）。元気ですよ！";
   check(sanitizeAssistantText(inp) === inp, "通常括弧を壊した: " + sanitizeAssistantText(inp));
 }
+// 9. 内部実行ログは除去し、前後の本文は保持
+{
+  const inp = "あら、明日のご予定ですね。\n\n[内部実行ログ — 完了済みにつき再実行不要: read_calendar]\n\nお調べしますね。";
+  const out = sanitizeAssistantText(inp);
+  check(!out.includes("内部実行ログ") && !out.includes("read_calendar"), "内部実行ログが残った: " + out);
+  check(out.includes("明日のご予定") && out.includes("お調べします"), "本文が消えた: " + out);
+}
 console.log(`\n=== ${pass} pass / ${fail} fail ===`);
 process.exit(fail === 0 ? 0 : 1);
