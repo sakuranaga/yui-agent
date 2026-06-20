@@ -611,12 +611,12 @@ body > div {
 
 /* translate(-50%) で水平中心揃えしてるので、animation 中も -50% を保持する */
 @keyframes report-panel-in {
-  from { opacity: 0; transform: translate(-50%, 8px) scale(0.98); }
-  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  from { transform: translate(-50%, 6px); }
+  to   { transform: translate(-50%, 0); }
 }
 @keyframes report-panel-out {
-  from { opacity: 1; transform: translate(-50%, 0) scale(1); }
-  to   { opacity: 0; transform: translate(-50%, 8px) scale(0.98); }
+  from { transform: translate(-50%, 0); }
+  to   { transform: translate(-50%, 6px); }
 }
 .report-panel.report-panel-closing {
   animation: report-panel-out 0.18s ease-in forwards;
