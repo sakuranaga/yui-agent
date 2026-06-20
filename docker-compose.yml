@@ -71,6 +71,9 @@ services:
       - DISCORD_SESSION_ID=${DISCORD_SESSION_ID:-}
       # Valkey (Redis 互換キャッシュ、internal only)
       - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379}
+      # デバッグレポート: =1 で各チャットターンの内部状態 (pick/executor/L2/エラー) を
+      # ReportPanel に表示。.env で DEBUG_REPORTS=1 にして restart で有効化。
+      - DEBUG_REPORTS=${DEBUG_REPORTS:-}
     # 外部ホスト (= 自宅 LAN / Tailscale / VPS で TTS / Embedding を別サーバ運用する場合) を
     # コンテナ内から解決したい時は、`.env` で `EXTRA_HOSTS_TTS` / `EXTRA_HOSTS_EMBED` 等を
     # 定義した上で、ここに `extra_hosts:` セクションを追加してください。

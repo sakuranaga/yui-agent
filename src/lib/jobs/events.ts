@@ -201,6 +201,28 @@ export function sessionSubscriberCount(sessionId: string): number {
   return subs.get(sessionId)?.size ?? 0;
 }
 
+/** env DEBUG_REPORTS=1 かつ **非 production** の時だけ有効。
+ *  debug report は内部 raw error を ReportPanel (SSE で client 配信) に載せるため、
+ *  CLAUDE.md「client に生エラーを返さない」に配慮し production build では無効化する
+ *  (owner 自己デバッグ = dev 運用前提)。 */
+export function debugReportsEnabled(): boolean {
+  return process.env.DEBUG_REPORTS === "1" && process.env.NODE_ENV !== "production";
+}
+
+/**
+ * デバッグレポートを ReportPanel (report_update SSE) に流す。env DEBUG_REPORTS=1 の時のみ。
+ * 内部の pick / executor 結果 / L2 発火 / LLM エラー等を、ログを掘らず UI でその場確認するため。
+ */
+export function pushDebugReport(sessionId: string, lines: string[]): void {
+  if (!debugReportsEnabled() || lines.length === 0) return;
+  pushToSession(sessionId, {
+    type: "report_update",
+    jobId: 0,
+    title: "🔧 Debug",
+    markdown: lines.join("\n"),
+  });
+}
+
 /** 現在 SSE 購読中の (= active) session id 一覧。MCP notify の broadcast 等で使う。 */
 export function activeSessionIds(): string[] {
   return [...subs.keys()];

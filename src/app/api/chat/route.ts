@@ -59,7 +59,7 @@ import { summarizeUserImageBg } from "@/lib/image-summary";
 import { saveImage } from "@/lib/chat-attachments";
 import { clientError } from "@/lib/api-error";
 import { fetchUrl, searchWeb } from "@/lib/tools/web";
-import { pushToSession } from "@/lib/jobs/events";
+import { pushToSession, pushDebugReport } from "@/lib/jobs/events";
 import { collectSecretaryStats } from "@/lib/secretary-stats";
 import {
   getMorningBriefForDate,
@@ -384,6 +384,10 @@ async function handlePost(req: Request): Promise<Response> {
       : randomUUID();
 
   const source: Source = isValidSource(body.source) ? body.source : "web";
+
+  // デバッグレポート (env DEBUG_REPORTS=1 時のみ ReportPanel に出す)。turn 中に内部状態を貯め、
+  // 成功/エラー時に push。pick 誤選択 / L2 誤爆 / LLM エラー等をログ調査なしで UI で見るため。
+  const dbg: string[] = [];
 
   // timer/alarm 発火 (= dispatchOnFireAction): savedText を生 user message として
   // 投入させない。<timer_event> でラップして「未信頼データ」と明示し、後段で
@@ -1014,6 +1018,7 @@ async function handlePost(req: Request): Promise<Response> {
           const filtered = registryTools.filter((t) => candidateSet.has(t.name));
           if (filtered.length > 0) executorTools = filtered;
         }
+        dbg.push(`- retrieval: ${retrieval.mode} ${registryTools.length}→${executorTools.length}`);
         if (process.env.NODE_ENV !== "production") {
           console.log(
             `[tool-retrieval] mode=${retrieval.mode} ${registryTools.length}→${executorTools.length} q="${currentUserMsg.slice(0, 30)}"`,
@@ -1130,6 +1135,11 @@ async function handlePost(req: Request): Promise<Response> {
     if (process.env.NODE_ENV !== "production" && picks.length > 0) {
       console.log(`[pick-shadow] #1 picks=[${picks.join(",")}] action=${pickedAction}`);
     }
+    dbg.push(
+      isUserTurn
+        ? `- #1 pick: [${picks.join(",") || "なし"}] action=${pickedAction}`
+        : `- #1 pick: (system turn = pick 無効)`,
+    );
     // #1 が text 無しで select_tool のみ返した場合の固定 ack 補完 (空 reply での 502 を防ぐ、設計 §4.2)。
     if (!ackText && picks.length > 0) {
       ackText = pickedAction ? "はい、対応しますね。" : "はい。";
@@ -1151,6 +1161,7 @@ async function handlePost(req: Request): Promise<Response> {
       if (process.env.NODE_ENV !== "production") {
         console.log(`[chat] executor: ${exec.outcomes.length} tool(s), stop=${exec.stopReason}, iters=${exec.iterations}`);
       }
+      dbg.push(`- #2: ${exec.outcomes.length} tool(s), stop=${exec.stopReason}`);
 
       // ── C: report/失敗/pending/打ち切り があれば結果を踏まえて報告 (tools 無し) ──
       // L2 安全網: 行動が期待されたのに #2 が 0 実行 → 必ず正直な C で報告 (docs §4.5)。
@@ -1168,6 +1179,8 @@ async function handlePost(req: Request): Promise<Response> {
         exec.stopReason,
         actionMissed,
       );
+      if (actionMissed) dbg.push(`- L2: 発火 (行動期待→0実行) → C で「できなかった」報告`);
+      else if (needsC) dbg.push(`- C: 結果報告あり`);
       if (needsC) {
         const cSystem: Anthropic.TextBlockParam[] = [
           ...systemBlocks,
@@ -1392,6 +1405,8 @@ async function handlePost(req: Request): Promise<Response> {
       })
       .catch((e) => console.warn("[chat] raw write failed:", e));
 
+    pushDebugReport(sessionId, [`**source=${source}** \`${currentUserMsg.slice(0, 40)}\``, ...dbg]);
+
     return Response.json({
       reply,
       emotion,
@@ -1405,6 +1420,11 @@ async function handlePost(req: Request): Promise<Response> {
       toolSummary: executedTools, // 次ターン送信時にこのターンの tool 実行履歴を Sonnet へ通告するため client が保持
     });
   } catch (e) {
+    // デバッグレポート: 内部エラー (credit 切れ / LLM 失敗 / timeout 等) を ReportPanel に出す。
+    // **dev かつ DEBUG_REPORTS=1** の時のみ (debugReportsEnabled、production では無効)。owner 自己
+    // デバッグ用なので raw message を載せる (client 向け HTTP sanitize は下の clientError が担当)。
+    dbg.push(`- ⚠️ error: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`);
+    pushDebugReport(sessionId, [`**source=${source}** (エラー)`, ...dbg]);
     if (e instanceof Anthropic.AuthenticationError) {
       return Response.json(
         { error: "invalid ANTHROPIC_API_KEY" },
