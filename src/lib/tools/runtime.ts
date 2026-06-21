@@ -152,10 +152,36 @@ function buildToolSummary(tool: ToolDef, input: unknown): string {
       : tool.confirmationPolicy === "confirm_external_send"
         ? "送信します"
         : "実行します";
+  const fmtTime = (v: unknown): string => {
+    if (!v || typeof v !== "object") return "";
+    const t = v as Record<string, unknown>;
+    if (typeof t.date === "string") return t.date;
+    if (typeof t.dateTime !== "string") return "";
+    const d = new Date(t.dateTime);
+    if (Number.isNaN(d.getTime())) return t.dateTime;
+    const f = new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: false,
+    });
+    return f.format(d);
+  };
+  if (tool.name === "gcal_create_event" && typeof i.summary === "string") {
+    const start = fmtTime(i.start);
+    const end = fmtTime(i.end);
+    const loc = typeof i.location === "string" && i.location ? ` @ ${i.location}` : "";
+    const when = start ? ` (${end ? `${start} - ${end}` : start})` : "";
+    return `予定「${i.summary}」${when}${loc}を登録します`;
+  }
   // tool name から domain 名を抜く
   const headline =
     typeof i.title === "string"
       ? `『${i.title}』を${verb}`
+      : typeof i.summary === "string"
+        ? `『${i.summary}』を${verb}`
       : typeof i.event_id === "string"
         ? `予定 ${i.event_id} を${verb}`
         : typeof i.id === "string" || typeof i.id === "number"

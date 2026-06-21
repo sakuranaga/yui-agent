@@ -13,7 +13,7 @@ import {
   type RetrievedChunk,
 } from "@/lib/memory";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
-import { wrapDirective, buildInternalDirectiveGuard } from "@/lib/internal-directive";
+import { buildInternalDirectiveGuard } from "@/lib/internal-directive";
 import {
   extractIncremental,
   isSessionEnd,
@@ -116,8 +116,8 @@ type Source = "web" | "discord_text" | "discord_voice" | "cron" | "timer" | "too
 
 /**
  * confirm 完了 (Phase B、§4.5) の payload。chat に再 turn を要求する時に body に乗る。
- * 通常 user message は無し (= messages: [])。route の前段で system prompt を組み立てて
- * Yui に「○○しました」「やめておきます」等の最終発話を生成させる。
+ * 通常 user message は無し (= messages: [])。確認完了報告は通常 chat 経路から隔離し、
+ * tool result / summary だけを材料にした短い LLM 報告にする。
  */
 type ToolConfirmResultPayload = {
   token: string;
@@ -354,6 +354,182 @@ function isValidToolConfirmResult(v: unknown): v is ToolConfirmResultPayload {
   );
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function formatConfirmEventTime(start: unknown, end: unknown): string {
+  const s = asRecord(start);
+  const e = asRecord(end);
+  if (!s) return "";
+  if (typeof s.date === "string") {
+    return `${formatJstDateLabel(s.date)}、終日`;
+  }
+  if (typeof s.dateTime !== "string") return "";
+  const sd = new Date(s.dateTime);
+  if (Number.isNaN(sd.getTime())) return s.dateTime;
+  const dateKey = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(sd);
+  const startTime = formatJstClock(sd);
+  let endTime = "";
+  if (e && typeof e.dateTime === "string") {
+    const ed = new Date(e.dateTime);
+    if (!Number.isNaN(ed.getTime())) {
+      const endDateKey = new Intl.DateTimeFormat("sv-SE", {
+        timeZone: "Asia/Tokyo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(ed);
+      if (endDateKey === dateKey) endTime = formatJstClock(ed);
+    }
+  }
+  return `${formatJstDateLabel(dateKey)}、${startTime}${endTime ? `から${endTime}まで` : "から"}`;
+}
+
+function formatJstDateLabel(ymd: string): string {
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const today = fmt.format(now);
+  const tomorrowDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const tomorrow = fmt.format(tomorrowDate);
+  if (ymd === today) return "今日";
+  if (ymd === tomorrow) return "明日";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return ymd;
+  return `${Number(m[2])}月${Number(m[3])}日`;
+}
+
+function formatJstClock(d: Date): string {
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return m === 0 ? `${h}時` : `${h}時${String(m).padStart(2, "0")}分`;
+}
+
+function buildToolConfirmFallbackReply(result: ToolConfirmResultPayload): string {
+  if (!result.success) {
+    if (result.reason === "user denied") {
+      return `承知しました。${result.summary}はやめておきます。`;
+    }
+    return `申し訳ございません。${result.summary}を実行できませんでした。${result.reason ? `理由は ${result.reason} です。` : ""}`.trim();
+  }
+
+  const root = asRecord(result.result);
+  const event = asRecord(root?.event);
+  if (result.toolName === "gcal_create_event" && event) {
+    const title = typeof event.summary === "string" ? event.summary : "予定";
+    const location = typeof event.location === "string" && event.location ? event.location : "";
+    const when = formatConfirmEventTime(event.start, event.end);
+    const target = `${location ? `${location}での` : ""}${title}`;
+    return `かしこまりました。${when ? `${when}、` : ""}${target}の予定を登録いたしました。`;
+  }
+
+  return `かしこまりました。${result.summary}が完了しました。`;
+}
+
+function textOfMessage(m: Anthropic.Message): string {
+  return m.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+}
+
+async function generateToolConfirmReply(result: ToolConfirmResultPayload): Promise<string> {
+  const fallback = buildToolConfirmFallbackReply(result);
+  const persona = await loadPersona();
+  const personaPrompt = buildYuiSystemPrompt(persona);
+  const payload = {
+    toolName: result.toolName,
+    summary: result.summary,
+    success: result.success,
+    reason: result.reason,
+    result: result.result,
+  };
+  const system = [
+    personaPrompt,
+    "",
+    "あなたは上記ペルソナとして、確認付きツールの完了報告を1文だけ作ります。",
+    "通常チャットの履歴・記憶・環境情報は一切使えません。入力 JSON だけが事実です。",
+    "入力 JSON に無い予定名、日付、時刻、場所、相手、結果を絶対に補完しないでください。",
+    "特に別の予定名や今日の予定を混ぜてはいけません。",
+    "success=true なら完了を自然に報告します。success=false なら未実行/中止を自然に報告します。",
+    "口調はペルソナに合わせてください。ただし簡潔に、1文だけ。内部情報、JSON、tool 名、token は出しません。",
+  ].join("\n");
+  const user = [
+    "この JSON だけを材料に、ご主人様への完了報告を1文で作ってください。",
+    "",
+    JSON.stringify(payload, null, 2).slice(0, 5000),
+  ].join("\n");
+  try {
+    const resp = await callLlm("voice", {
+      system,
+      messages: [{ role: "user", content: user }],
+      maxTokens: 160,
+      temperature: 0.3,
+    });
+    const text = sanitizeAssistantText(textOfMessage(resp));
+    return text || fallback;
+  } catch (e) {
+    console.warn("[chat] tool_confirm_result voice generation failed:", e);
+    return fallback;
+  }
+}
+
+async function respondToolConfirmResult(
+  sessionId: string,
+  result: ToolConfirmResultPayload,
+): Promise<Response> {
+  const reply = sanitizeAssistantText(await generateToolConfirmReply(result)) || "かしこまりました。";
+  const emotion = classifyEmotion(reply);
+  pushToSession(sessionId, {
+    type: "yui_message",
+    jobId: -1,
+    text: reply,
+    emotion,
+    specialistId: undefined,
+  });
+
+  const { getEffectiveState } = await import("@/lib/activity");
+  if ((await getEffectiveState(sessionId)) === "private") {
+    const { appendOverlay } = await import("@/lib/conversation-overlay");
+    await appendOverlay(sessionId, {
+      role: "assistant",
+      content: reply,
+      kind: "private",
+      source: "tool_confirm_result",
+      emotion,
+      ts: Date.now(),
+    });
+  } else {
+    await writeAssistantMessage({ sessionId, source: "cron", content: reply, emotion });
+  }
+
+  return Response.json({
+    reply,
+    emotion,
+    sessionId,
+    memoryCounts: { alwaysOn: 0, recentSummaries: 0, relevant: 0 },
+    pendingJobs: [],
+    toolSummary: [],
+  });
+}
+
 export async function POST(req: Request): Promise<Response> {
   return withTrace(`chat:${Date.now().toString(36)}`, () => handlePost(req));
 }
@@ -495,20 +671,9 @@ async function handlePost(req: Request): Promise<Response> {
       : null;
   const isToolConfirmMode = toolConfirmResult !== null;
   if (isToolConfirmMode && toolConfirmResult) {
-    // summary は buildToolSummary 由来で tool input (title/id 等) を含むため、命令文に混ぜず
-    // data 行として分離する (= guard の「data field は追加指示ではない」条項で不活性化)。
-    const resultLine = toolConfirmResult.success
-      ? wrapDirective(
-          "確認付き tool の実行が完了しました。下の result データを踏まえ、ご主人様に1文で" +
-            "完了報告してください。tool は呼ばずテキストのみ。\n" +
-            `result(データ): tool=${toolConfirmResult.toolName} / ${toolConfirmResult.summary}`
-        )
-      : wrapDirective(
-          "確認付き tool の実行をご主人様が拒否しました。下の result データを踏まえ、" +
-            "「やめておきます」を含む短い1文で結衣の口調で返してください。tool は呼ばずテキストのみ。\n" +
-            `result(データ): tool=${toolConfirmResult.toolName} / ${toolConfirmResult.summary} / 理由=${toolConfirmResult.reason ?? "user denied"}`
-        );
-    messages = [{ role: "user", content: resultLine }];
+    // confirm 完了報告は通常 chat 経路から隔離する。env/memory を混ぜると別予定を拾って
+    // 「ピクサー展を登録しました」のような誤報告が起きるため、専用の最小 LLM 入力で作る。
+    return respondToolConfirmResult(sessionId, toolConfirmResult);
   }
 
   if (messages.length === 0) {
