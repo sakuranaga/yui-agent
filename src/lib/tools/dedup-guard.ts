@@ -7,7 +7,7 @@
  */
 import { db } from "@/db/client";
 import { sql, eq } from "drizzle-orm";
-import { toolExecutionLog } from "@/db/schema";
+import { tasks, toolExecutionLog } from "@/db/schema";
 import { embed, toPgVector } from "@/lib/embed";
 import { getEmbedConfig } from "@/lib/ai-settings";
 import type { ToolDef, ToolContext } from "@/lib/tools/types";
@@ -171,6 +171,35 @@ export async function finalizeReservationByToken(
       .where(eq(toolExecutionLog.confirmToken, token));
   } catch (e) {
     console.warn(`[dedup] finalizeReservationByToken(${status}) 失敗:`, e);
+  }
+}
+
+/**
+ * Calendar event を削除したら、その event を作成した create dedup reservation は
+ * 以後の重複判定対象から外す。削除後に同じ日時・同じタイトルで再登録できない事故を防ぐ。
+ */
+export async function cancelCalendarCreateDedupForDeletedEvent(
+  sessionId: string,
+  eventId: string,
+): Promise<void> {
+  if (!eventId) return;
+  try {
+    await db.execute(sql`
+      UPDATE ${toolExecutionLog}
+      SET status = 'cancelled', updated_at = now()
+      WHERE tool_name = 'gcal_create_event'
+        AND status IN ('executed', 'pending_confirmation', 'executing')
+        AND confirm_token IN (
+          SELECT output->'confirmFinal'->>'token'
+          FROM ${tasks}
+          WHERE session_id = ${sessionId}
+            AND output->'confirmFinal'->>'toolName' = 'gcal_create_event'
+            AND output->'confirmFinal'->>'success' = 'true'
+            AND output->'confirmFinal'->'result'->'event'->>'id' = ${eventId}
+        )
+    `);
+  } catch (e) {
+    console.warn(`[dedup] cancelCalendarCreateDedupForDeletedEvent(${eventId}) 失敗:`, e);
   }
 }
 

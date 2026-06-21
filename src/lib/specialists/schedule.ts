@@ -226,6 +226,18 @@ const tools: SpecialistTool[] = [
       properties: {
         calendar_id: { type: "string" },
         event_id: { type: "string" },
+        summary: {
+          type: "string",
+          description: "確認表示用のイベントタイトル。分かっている場合は必ず渡す",
+        },
+        start_jst: {
+          type: "string",
+          description: "確認表示用の開始時刻 (例: 2026-06-22 20:00 JST)。分かっている場合は必ず渡す",
+        },
+        end_jst: {
+          type: "string",
+          description: "確認表示用の終了時刻。分かっている場合のみ渡す",
+        },
       },
       required: ["event_id"],
       additionalProperties: false,
@@ -262,6 +274,7 @@ Google Calendar API に直接接続されており、予定の取得・追加・
 7. 削除/更新依頼で query に event_id が明示されている場合は、その1件だけを対象にする。タイトル検索で別候補を広げない。
 8. 削除/更新依頼で候補が複数ある場合、ユーザーが「全件」「すべて」と明示していても勝手に一括削除/一括更新しない。「結論: 確認必要 — 候補 N件」と候補を列挙して止める。
 9. gcal_list_events / gcal_get_event だけを実行した状態で、「削除完了」「更新完了」「作成完了」と絶対に書かない。完了と言えるのは対応する gcal_create_event / gcal_update_event / gcal_delete_event が実行結果として成功した場合だけ。
+10. gcal_delete_event を呼ぶ時、削除対象の summary / start_jst / end_jst が分かっているなら必ず input に含める。これは確認ダイアログ表示用で、event_id と同じ対象の情報だけを入れる。
 
 ## 🚨 出力に関する厳守ルール
 - 最終応答 (tool_use を伴わない turn) は必ず **「結論:」で始める**。

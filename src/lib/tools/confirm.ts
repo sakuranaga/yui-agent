@@ -26,7 +26,10 @@ import type {
   ToolMode,
 } from "./types";
 import { ALL_TOOLS } from "./registry";
-import { finalizeReservationByToken } from "./dedup-guard";
+import {
+  cancelCalendarCreateDedupForDeletedEvent,
+  finalizeReservationByToken,
+} from "./dedup-guard";
 import { emitConfirmResult } from "./confirm-result-controller";
 
 const CONFIRM_TTL_SEC = 600; // 10 分
@@ -262,6 +265,15 @@ async function markExecuted(token: string, result: unknown): Promise<void> {
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
   // dedup reservation を確定 (executed)。
   await finalizeReservationByToken(token, "executed");
+  if (p.toolName === "gcal_delete_event") {
+    const eventId =
+      result && typeof result === "object" && !Array.isArray(result)
+        ? (result as Record<string, unknown>).event_id
+        : undefined;
+    if (typeof eventId === "string") {
+      await cancelCalendarCreateDedupForDeletedEvent(p.sessionId, eventId);
+    }
+  }
   await markTaskConfirmFinal({
     token,
     toolName: p.toolName,

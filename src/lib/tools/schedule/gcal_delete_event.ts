@@ -10,6 +10,18 @@ export const gcalDeleteEvent: ToolDef = {
     properties: {
       calendar_id: { type: "string" },
       event_id: { type: "string" },
+      summary: {
+        type: "string",
+        description: "確認表示用のイベントタイトル。分かっている場合は必ず渡す",
+      },
+      start_jst: {
+        type: "string",
+        description: "確認表示用の開始時刻 (例: 2026-06-22 20:00 JST)。分かっている場合は必ず渡す",
+      },
+      end_jst: {
+        type: "string",
+        description: "確認表示用の終了時刻。分かっている場合のみ渡す",
+      },
     },
     required: ["event_id"],
     additionalProperties: false,

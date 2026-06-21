@@ -176,6 +176,20 @@ function buildToolSummary(tool: ToolDef, input: unknown): string {
     const when = start ? ` (${end ? `${start} - ${end}` : start})` : "";
     return `予定「${i.summary}」${when}${loc}を登録します`;
   }
+  if (tool.name === "gcal_delete_event") {
+    const title =
+      typeof i.summary === "string" && i.summary
+        ? `「${i.summary}」`
+        : typeof i.title === "string" && i.title
+          ? `「${i.title}」`
+          : typeof i.event_id === "string"
+            ? i.event_id
+            : "予定";
+    const start = typeof i.start_jst === "string" ? i.start_jst : "";
+    const end = typeof i.end_jst === "string" ? i.end_jst : "";
+    const when = start ? ` (${end ? `${start} - ${end}` : start})` : "";
+    return `予定${title}${when}を削除します`;
+  }
   // tool name から domain 名を抜く
   const headline =
     typeof i.title === "string"

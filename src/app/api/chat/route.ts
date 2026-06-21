@@ -285,9 +285,10 @@ function buildExplicitDeleteQuery(event: ConfirmedCalendarEventRef, originalQuer
     `event_id=${event.id}`,
     `calendar_id=${event.calendarId ?? "primary"}`,
   ];
-  if (event.summary) parts.push(`title="${event.summary}"`);
-  if (event.startJst) parts.push(`start_jst=${event.startJst}`);
-  if (event.endJst) parts.push(`end_jst=${event.endJst}`);
+  if (event.summary) parts.push(`summary="${event.summary}"`);
+  if (event.startJst) parts.push(`start_jst="${event.startJst}"`);
+  if (event.endJst) parts.push(`end_jst="${event.endJst}"`);
+  parts.push("gcal_delete_event input には event_id に加えて、分かっている summary/start_jst/end_jst も必ず含める。");
   parts.push("他の候補を検索してまとめて削除しない。該当 event_id の1件だけを対象にする。");
   if (originalQuery) parts.push(`元の依頼: ${originalQuery}`);
   return parts.join(" ");
