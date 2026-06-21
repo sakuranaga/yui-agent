@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { buildYuiSystemPrompt } from "./yui-prompt";
 import { loadPersona } from "@/lib/persona";
 import {
+  buildPendingJobAck,
+  generateDirectToolReply,
+} from "@/lib/chat/response-renderer";
+import { planExecutorResponse } from "@/lib/chat/response-planner";
+import {
   buildQueryText,
   formatMemoryPrompt,
   loadAlwaysOnFacts,
@@ -35,14 +40,12 @@ import {
 import { createDispatchLedger } from "@/lib/tools/dispatch";
 import {
   runExecutor,
-  aggregateForReport,
   type ExtraToolHandler,
 } from "@/lib/tools/executor";
 import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
 import { decideToolGate, type ToolGateDecision } from "@/lib/tools/gate";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
-import type { UnifiedToolOutcome } from "@/lib/tools/outcome";
 import { classifyEmotion } from "@/lib/emotion";
 import {
   listArticles as listNewsArticles,
@@ -294,22 +297,6 @@ function buildExplicitDeleteQuery(event: ConfirmedCalendarEventRef, originalQuer
   return parts.join(" ");
 }
 
-function buildPendingJobAck(
-  jobs: Array<{ jobId: number; specialist: string }>,
-  userText: string,
-): string {
-  const specialists = new Set(jobs.map((j) => j.specialist));
-  if (specialists.has("schedule") || specialists.has("ask_schedule_specialist")) {
-    if (/明日.*(予定|スケジュール|カレンダー)|(予定|スケジュール|カレンダー).*明日/.test(userText)) {
-      return "あら、明日のご予定ですね。お調べしますので、少しお待ちください。";
-    }
-    return "ご予定をお調べしますので、少しお待ちください。";
-  }
-  if (specialists.has("mail") || specialists.has("ask_mail_specialist")) return "メールを確認しますので、少しお待ちください。";
-  if (specialists.has("research") || specialists.has("ask_research_specialist")) return "お調べしますので、少しお待ちください。";
-  return "確認しますので、少しお待ちください。";
-}
-
 const MAX_IMAGES_PER_TURN = 10;
 
 /**
@@ -415,14 +402,6 @@ function isValidSource(s: unknown): s is Source {
   );
 }
 
-function textOfMessage(m: Anthropic.Message): string {
-  return m.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-}
-
 function shouldUseCurrentOnlyForExecutor(
   gateDecision: ToolGateDecision,
   currentUserMsg: string
@@ -438,48 +417,6 @@ function shouldUseCurrentOnlyForExecutor(
       currentUserMsg
     );
   return hasMutationVerb && hasTimeOrDate;
-}
-
-async function generateDirectToolReply(args: {
-  currentUserMsg: string;
-  outcomes: UnifiedToolOutcome[];
-}): Promise<string> {
-  const persona = await loadPersona();
-  const personaPrompt = buildYuiSystemPrompt(persona);
-  const payload = {
-    userMessage: args.currentUserMsg,
-    outcomes: args.outcomes.map((o) => ({
-      toolName: o.toolName,
-      state: o.state,
-      responsePolicy: o.responsePolicy,
-      userVisible: o.userVisible,
-      input: o.input,
-      result: o.result,
-      skipReason: o.skipReason ?? null,
-      error: o.error ?? null,
-    })),
-  };
-  const system = [
-    personaPrompt,
-    "",
-    "あなたは上記ペルソナとして、アプリ内ツールの実行完了を1文だけ自然に報告します。",
-    "通常チャットの履歴・記憶・環境情報は一切使えません。入力 JSON だけが事実です。",
-    "入力 JSON に無いタイトル、日時、場所、件数、結果を絶対に補完しないでください。",
-    "toolName や JSON や内部処理名は出さず、ユーザーに見える自然な言葉だけで返してください。",
-    "口調はペルソナに合わせてください。ただし簡潔に、1文だけ。",
-  ].join("\n");
-  const user = [
-    "この JSON だけを材料に、ご主人様への完了報告を1文で作ってください。",
-    "",
-    JSON.stringify(payload, null, 2).slice(0, 6000),
-  ].join("\n");
-  const resp = await callLlm("voice", {
-    system,
-    messages: [{ role: "user", content: user }],
-    maxTokens: 160,
-    temperature: 0.3,
-  });
-  return sanitizeAssistantText(textOfMessage(resp));
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -1148,6 +1085,7 @@ async function handlePost(req: Request): Promise<Response> {
     let ackText = "";
     let finalIterText = "";
     let didMainFallback = false;
+    let executorResponsePlan: ReturnType<typeof planExecutorResponse> | null = null;
 
     if (!runExec) {
       const bResp = await callLlm("main", { system: systemBlocks, messages: apiMessages });
@@ -1234,17 +1172,14 @@ async function handlePost(req: Request): Promise<Response> {
       // 主信号は Gate の tool_required。Executor が明示 declined して main fallback 済みなら雑談として扱う。
       // **ユーザー発起ターンのみ** (isUserTurn、上で定義)。cron/timer の
       // system speak (song-change の曲紹介等) は 0 実行が正常なので L2 を効かせない (実機: 曲紹介で謝罪が出た)。
-      const actionMissed =
-        isUserTurn &&
-        gateDecision.decision === "tool_required" &&
-        !didMainFallback &&
-        exec.outcomes.length === 0 &&
-        exec.stopReason !== "declined";
-      const { text: resultsText, needsC } = aggregateForReport(
-        exec.outcomes,
-        exec.stopReason,
-        actionMissed,
-      );
+      executorResponsePlan = planExecutorResponse({
+        outcomes: exec.outcomes,
+        stopReason: exec.stopReason,
+        isUserTurn,
+        gateRequired: gateDecision.decision === "tool_required",
+        didMainFallback,
+      });
+      const { actionMissed, reportText: resultsText, needsC } = executorResponsePlan;
       if (actionMissed) dbg.push(`- L2: 発火 (行動期待→0実行) → C で「できなかった」報告`);
       else if (needsC) dbg.push(`- C: 結果報告あり`);
       if (needsC) {
@@ -1290,17 +1225,15 @@ async function handlePost(req: Request): Promise<Response> {
     }
 
     if (!reply && exec && pendingJobs.length === 0) {
-      const finalDirectOutcomes = exec.outcomes
-        .filter(
-          (o) =>
-            o.outcome.unifiedOutcome &&
-            o.outcome.unifiedOutcome.userVisible === "final" &&
-            (o.outcome.unifiedOutcome.responsePolicy === "final" ||
-              o.outcome.unifiedOutcome.responsePolicy === "report") &&
-            !o.toolName.startsWith("ask_"),
-        )
-        .map((o) => o.outcome.unifiedOutcome!)
-        .filter((o) => o.state === "executed" || o.skipReason === "dedup_recent_execution");
+      const finalDirectOutcomes =
+        executorResponsePlan?.finalDirectOutcomes ??
+        planExecutorResponse({
+          outcomes: exec.outcomes,
+          stopReason: exec.stopReason,
+          isUserTurn,
+          gateRequired: gateDecision.decision === "tool_required",
+          didMainFallback,
+        }).finalDirectOutcomes;
       if (finalDirectOutcomes.length > 0) {
         try {
           reply = await generateDirectToolReply({
