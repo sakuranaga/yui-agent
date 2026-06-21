@@ -12,6 +12,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ToolDef, ToolContext, ToolDisposition } from "./types";
 import { runTool, resolveDispatch, isDedupSkipResult } from "./runtime";
+import {
+  toUnifiedToolOutcomeForContext,
+  type UnifiedToolOutcome,
+  type ToolSkipReason,
+} from "./outcome";
 
 export type ExecutionState = "executed" | "pending_confirmation" | "skipped" | "failed";
 
@@ -20,7 +25,9 @@ export type DispatchOutcome = {
   disposition: ToolDisposition;
   result: Anthropic.ToolResultBlockParam;
   /** skipped の理由 (ログ・デバッグ用)。dedup_recent_execution = ターンをまたぐ重複ガード。 */
-  skipReason?: "budget" | "duplicate" | "depth" | "dedup_recent_execution";
+  skipReason?: ToolSkipReason;
+  /** v6 Phase 1: 後続 ResponsePlanner / specialist state 用の正規化 outcome。既存分岐はまだ executionState を使う。 */
+  unifiedOutcome?: UnifiedToolOutcome;
 };
 
 /**
@@ -111,20 +118,46 @@ export async function dispatchTool(
 ): Promise<DispatchOutcome> {
   const dispatch = resolveDispatch(tool);
   const base = { disposition: dispatch.disposition };
+  const buildOutcome = (
+    executionState: ExecutionState,
+    result: Anthropic.ToolResultBlockParam,
+    skipReason?: ToolSkipReason,
+  ): DispatchOutcome => {
+    const unifiedOutcome = toUnifiedToolOutcomeForContext({
+      tool,
+      toolUseId: tu.id,
+      input: tu.input,
+      executionState,
+      disposition: dispatch.disposition,
+      result,
+      skipReason,
+      ctx,
+    });
+    if (process.env.DEBUG_TOOL_OUTCOMES === "1") {
+      console.log("[tool-outcome]", JSON.stringify(unifiedOutcome));
+    }
+    return {
+      ...base,
+      executionState,
+      result,
+      skipReason,
+      unifiedOutcome,
+    };
+  };
 
   // depth ガード (階層跨ぎ再帰の停止性)
   if (depth > ledger.maxDepth) {
-    return { ...base, executionState: "skipped", result: skipResult(tu.id, "depth limit reached"), skipReason: "depth" };
+    return buildOutcome("skipped", skipResult(tu.id, "depth limit reached"), "depth");
   }
   // budget ガード (総量キャップ)
   if (ledger.budgetRemaining <= 0) {
-    return { ...base, executionState: "skipped", result: skipResult(tu.id, "tool budget exhausted"), skipReason: "budget" };
+    return buildOutcome("skipped", skipResult(tu.id, "tool budget exhausted"), "budget");
   }
   // idempotency (mutation/external-send の二重実行抑止)
   const guarded = isIdempotencyGuarded(tool);
   const key = `${tool.name}|${stableStringify(tu.input)}`;
   if (guarded && ledger.executedMutations.has(key)) {
-    return { ...base, executionState: "skipped", result: skipResult(tu.id, "duplicate mutation suppressed"), skipReason: "duplicate" };
+    return buildOutcome("skipped", skipResult(tu.id, "duplicate mutation suppressed"), "duplicate");
   }
 
   ledger.budgetRemaining--;
@@ -139,23 +172,22 @@ export async function dispatchTool(
   } catch (e) {
     // runTool は通常 throw しない (handler エラーは is_error で返す) が、単一ゲートウェイ契約上保険。
     if (guarded) ledger.executedMutations.delete(key);
-    return {
-      ...base,
-      executionState: "failed",
-      result: {
+    return buildOutcome(
+      "failed",
+      {
         type: "tool_result",
         tool_use_id: tu.id,
         content: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
         is_error: true,
       },
-    };
+    );
   }
 
   // dedup スキップ: runTool が重複でスキップした (confirm/auto 両経路、handler 未実行)。
   // confirmationPolicy 判定より先に振り分ける (confirm tool が「確認待ち」と誤報告されるのを防ぐ)。
   if (isDedupSkipResult(result)) {
     if (guarded) ledger.executedMutations.delete(key); // 実行していない → ターン内予約を解除
-    return { ...base, executionState: "skipped", result, skipReason: "dedup_recent_execution" };
+    return buildOutcome("skipped", result, "dedup_recent_execution");
   }
 
   // executionState 判定 (confirmationPolicy ベース。content パースに依存しない)
@@ -174,5 +206,5 @@ export async function dispatchTool(
     executionState = "executed"; // 予約を確定
   }
 
-  return { ...base, executionState, result };
+  return buildOutcome(executionState, result);
 }

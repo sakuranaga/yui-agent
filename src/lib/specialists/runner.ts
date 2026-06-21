@@ -10,12 +10,31 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Specialist } from "./types";
 import { buildTimeContextBlock } from "@/lib/time";
 import { wrapDirective, buildInternalDirectiveGuard } from "@/lib/internal-directive";
+import type { ToolDef } from "@/lib/tools/types";
+import {
+  parseToolResultContent,
+  reduceToolRunState,
+  toUnifiedToolOutcomeForContext,
+  type OutcomeExecutionState,
+  type UnifiedToolOutcome,
+} from "@/lib/tools/outcome";
 
 import { callLlm } from "@/lib/llm";
+
+export type SpecialistRunState =
+  | "completed"
+  | "pending_confirmation"
+  | "failed"
+  | "partial"
+  | "skipped";
 
 export type SpecialistRunResult = {
   /** Yui に渡すテキスト */
   text: string;
+  /** v6: specialist job 全体の構造化 state。自然文 text から制御判定しない。 */
+  state: SpecialistRunState;
+  /** v6: specialist 内で実行された tool_result の正規化 outcome。 */
+  outcomes: UnifiedToolOutcome[];
   /** 統計 */
   stats: {
     llmCalls: number;
@@ -28,6 +47,49 @@ export type SpecialistRunResult = {
     truncated: boolean;
   };
 };
+
+function resultState(
+  tool: ToolDef,
+  result: Anthropic.ToolResultBlockParam,
+  isDedupSkipResult: (result: Anthropic.ToolResultBlockParam) => boolean,
+): { state: OutcomeExecutionState; skipReason?: "dedup_recent_execution" } {
+  if (isDedupSkipResult(result)) {
+    return { state: "skipped", skipReason: "dedup_recent_execution" };
+  }
+  if (result.is_error) return { state: "failed" };
+  const parsed = parseToolResultContent(result);
+  if (
+    parsed.confirmRequired &&
+    (tool.confirmationPolicy === "confirm_destructive" ||
+      tool.confirmationPolicy === "confirm_external_send")
+  ) {
+    return { state: "pending_confirmation" };
+  }
+  return { state: "executed" };
+}
+
+function unknownToolOutcome(args: {
+  toolUseId: string;
+  toolName: string;
+  input: unknown;
+  result: Anthropic.ToolResultBlockParam;
+}): UnifiedToolOutcome {
+  const parsed = parseToolResultContent(args.result);
+  return {
+    id: args.toolUseId,
+    toolUseId: args.toolUseId,
+    source: "specialist_job",
+    toolName: args.toolName,
+    kind: "specialist",
+    state: "failed",
+    disposition: "report",
+    responsePolicy: "report",
+    userVisible: "error",
+    input: args.input,
+    result: parsed.value,
+    error: parsed.error ?? `unknown tool: ${args.toolName}`,
+  };
+}
 
 /**
  * specialist のループ runner。v3 ツール基盤統合: spec.tools の SpecialistTool[] 経路を
@@ -48,9 +110,14 @@ export async function runSpecialist(
   const maxTokens = spec.maxTokens ?? 800;
 
   // registry 経由で specialist caller の tool 群を取得 (= 動的 availability 含む)
-  const { toolsForContext, toAnthropicTools, runTool, buildSystemGuards } = await import(
-    "@/lib/tools/runtime"
-  );
+  const {
+    toolsForContext,
+    toAnthropicTools,
+    runTool,
+    buildSystemGuards,
+    isDedupSkipResult,
+    resolveDispatch,
+  } = await import("@/lib/tools/runtime");
   const availabilityCache = new Map<string, Promise<boolean>>();
   const caller = { kind: "specialist" as const, id: spec.id };
   const registryTools = await toolsForContext({
@@ -82,6 +149,7 @@ export async function runSpecialist(
   // 「Found 2: X and Y」を iter の途中で言って次の tool_use に行ってしまうと、
   // 最終 iter の text しか拾わない実装だと拾えなくなる (= 中間ファクト消失)。
   const accumulatedTexts: string[] = [];
+  const outcomes: UnifiedToolOutcome[] = [];
 
   for (let iter = 0; iter < maxIter; iter++) {
     response = await callLlm("specialist", {
@@ -134,11 +202,11 @@ export async function runSpecialist(
     );
     toolCalls += toolUses.length;
 
-    const results: Anthropic.ToolResultBlockParam[] = await Promise.all(
+    const executed = await Promise.all(
       toolUses.map(async (tu) => {
         const tool = toolByName.get(tu.name);
         if (!tool) {
-          return {
+          const result = {
             type: "tool_result" as const,
             tool_use_id: tu.id,
             content: JSON.stringify({
@@ -146,10 +214,19 @@ export async function runSpecialist(
             }),
             is_error: true,
           };
+          return {
+            result,
+            outcome: unknownToolOutcome({
+              toolUseId: tu.id,
+              toolName: tu.name,
+              input: tu.input,
+              result,
+            }),
+          };
         }
         // runTool は untrustedOutput ラップ / confirmationPolicy ゲート /
         // 例外 → is_error tool_result まで全部面倒見る
-        return await runTool(
+        const result = await runTool(
           tool,
           { id: tu.id, input: tu.input },
           {
@@ -160,8 +237,25 @@ export async function runSpecialist(
             availabilityCache,
           }
         );
+        const state = resultState(tool, result, isDedupSkipResult);
+        return {
+          result,
+          outcome: toUnifiedToolOutcomeForContext({
+            tool,
+            toolUseId: tu.id,
+            input: tu.input,
+            executionState: state.state,
+            disposition: resolveDispatch(tool).disposition,
+            result,
+            skipReason: state.skipReason,
+            ctx: { caller },
+            kind: "specialist",
+          }),
+        };
       })
     );
+    const results = executed.map((r) => r.result);
+    outcomes.push(...executed.map((r) => r.outcome));
 
     messages.push({ role: "user", content: results });
   }
@@ -185,6 +279,31 @@ export async function runSpecialist(
         }),
         is_error: true,
       }));
+      outcomes.push(
+        ...toolUses.map((tu, index) => {
+          const tool = toolByName.get(tu.name);
+          const result = stubResults[index];
+          if (!tool) {
+            return unknownToolOutcome({
+              toolUseId: tu.id,
+              toolName: tu.name,
+              input: tu.input,
+              result,
+            });
+          }
+          return toUnifiedToolOutcomeForContext({
+            tool,
+            toolUseId: tu.id,
+            input: tu.input,
+            executionState: "skipped",
+            disposition: resolveDispatch(tool).disposition,
+            result,
+            skipReason: "budget",
+            ctx: { caller },
+            kind: "specialist",
+          });
+        }),
+      );
       messages.push({ role: "user", content: stubResults });
     }
     messages.push({
@@ -231,6 +350,8 @@ export async function runSpecialist(
 
   return {
     text: text || "(specialist returned empty result)",
+    state: reduceToolRunState(outcomes),
+    outcomes,
     stats: {
       llmCalls,
       toolCalls,

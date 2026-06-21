@@ -42,6 +42,7 @@ import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
 import { decideToolGate, type ToolGateDecision } from "@/lib/tools/gate";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
+import type { UnifiedToolOutcome } from "@/lib/tools/outcome";
 import { classifyEmotion } from "@/lib/emotion";
 import {
   listArticles as listNewsArticles,
@@ -308,6 +309,13 @@ function briefToolInput(toolName: string, input: Record<string, unknown>): strin
     case "create_timer": {
       return [v("label"), v("fire_at"), v("relative")].filter(Boolean).join(" ");
     }
+    case "add_reminder": {
+      const parts: string[] = [];
+      if (v("title")) parts.push(`title="${v("title")}"`);
+      if (v("base_at")) parts.push(`base_at=${v("base_at")}`);
+      if (v("base_time")) parts.push(`base_time=${v("base_time")}`);
+      return parts.join(" ");
+    }
     case "cancel_timer": {
       return v("id") ?? v("match") ?? "";
     }
@@ -489,6 +497,48 @@ async function generateToolConfirmReply(result: ToolConfirmResultPayload): Promi
     console.warn("[chat] tool_confirm_result voice generation failed:", e);
     return fallback;
   }
+}
+
+async function generateDirectToolReply(args: {
+  currentUserMsg: string;
+  outcomes: UnifiedToolOutcome[];
+}): Promise<string> {
+  const persona = await loadPersona();
+  const personaPrompt = buildYuiSystemPrompt(persona);
+  const payload = {
+    userMessage: args.currentUserMsg,
+    outcomes: args.outcomes.map((o) => ({
+      toolName: o.toolName,
+      state: o.state,
+      responsePolicy: o.responsePolicy,
+      userVisible: o.userVisible,
+      input: o.input,
+      result: o.result,
+      skipReason: o.skipReason ?? null,
+      error: o.error ?? null,
+    })),
+  };
+  const system = [
+    personaPrompt,
+    "",
+    "あなたは上記ペルソナとして、アプリ内ツールの実行完了を1文だけ自然に報告します。",
+    "通常チャットの履歴・記憶・環境情報は一切使えません。入力 JSON だけが事実です。",
+    "入力 JSON に無いタイトル、日時、場所、件数、結果を絶対に補完しないでください。",
+    "toolName や JSON や内部処理名は出さず、ユーザーに見える自然な言葉だけで返してください。",
+    "口調はペルソナに合わせてください。ただし簡潔に、1文だけ。",
+  ].join("\n");
+  const user = [
+    "この JSON だけを材料に、ご主人様への完了報告を1文で作ってください。",
+    "",
+    JSON.stringify(payload, null, 2).slice(0, 6000),
+  ].join("\n");
+  const resp = await callLlm("voice", {
+    system,
+    messages: [{ role: "user", content: user }],
+    maxTokens: 160,
+    temperature: 0.3,
+  });
+  return sanitizeAssistantText(textOfMessage(resp));
 }
 
 async function respondToolConfirmResult(
@@ -1332,6 +1382,30 @@ async function handlePost(req: Request): Promise<Response> {
     }
     if (!reply && accumulatedTexts.length > 0) {
       reply = accumulatedTexts.join("\n").trim();
+    }
+
+    if (!reply && exec && pendingJobs.length === 0) {
+      const finalDirectOutcomes = exec.outcomes
+        .filter(
+          (o) =>
+            o.outcome.unifiedOutcome &&
+            o.outcome.unifiedOutcome.userVisible === "final" &&
+            (o.outcome.unifiedOutcome.responsePolicy === "final" ||
+              o.outcome.unifiedOutcome.responsePolicy === "report") &&
+            !o.toolName.startsWith("ask_"),
+        )
+        .map((o) => o.outcome.unifiedOutcome!)
+        .filter((o) => o.state === "executed" || o.skipReason === "dedup_recent_execution");
+      if (finalDirectOutcomes.length > 0) {
+        try {
+          reply = await generateDirectToolReply({
+            currentUserMsg,
+            outcomes: finalDirectOutcomes,
+          });
+        } catch (e) {
+          console.warn("[chat] direct tool voice generation failed:", e);
+        }
+      }
     }
 
     // それでも空なら最終フォールバック ack

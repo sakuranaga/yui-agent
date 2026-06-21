@@ -154,8 +154,9 @@ async function runJobInner(args: {
     //       であるべきで、API failure の記録ではない (= UI 上ノイズになる + 古い表示が
     //       次のターンと混じって見える事故を防ぐ)。
     const isTechError = /Spotify と未連携|Premium が必要|デバイスが見つかりません|未設定/.test(specResult.text);
+    const isPendingConfirmation = specResult.state === "pending_confirmation";
     let report: { title: string; markdown: string } | null = null;
-    if (!isTechError) {
+    if (!isTechError && !isPendingConfirmation) {
       try {
         report = await generateReport({
           originalUserMessage,
@@ -170,20 +171,22 @@ async function runJobInner(args: {
 
     let yuiText = specResult.text;
     let emotion: string = "neutral";
-    try {
-      const voiceResult = await formatInYuiVoice({
-        originalUserMessage,
-        specialistText: specResult.text,
-        specialistId,
-        conversationHistory,
-        reportMarkdown: report?.markdown ?? null,
-        sessionId,
-        yuiAckText,
-      });
-      yuiText = voiceResult.text;
-      emotion = voiceResult.emotion;
-    } catch (e) {
-      console.warn(`[job ${jobId}] voice formatting failed:`, e);
+    if (!isPendingConfirmation) {
+      try {
+        const voiceResult = await formatInYuiVoice({
+          originalUserMessage,
+          specialistText: specResult.text,
+          specialistId,
+          conversationHistory,
+          reportMarkdown: report?.markdown ?? null,
+          sessionId,
+          yuiAckText,
+        });
+        yuiText = voiceResult.text;
+        emotion = voiceResult.emotion;
+      } catch (e) {
+        console.warn(`[job ${jobId}] voice formatting failed:`, e);
+      }
     }
 
     // 5. tasks 完了記録
@@ -193,10 +196,12 @@ async function runJobInner(args: {
         status: "succeeded",
         completedAt: new Date(),
         output: {
+          state: specResult.state,
           specialistText: specResult.text,
           yuiText,
           emotion,
           report,
+          outcomes: specResult.outcomes,
           stats: specResult.stats,
         },
       })
@@ -210,13 +215,15 @@ async function runJobInner(args: {
     });
 
     // 6. SSE push (会話メッセージ + ノートパネル更新)
-    pushToSession(sessionId, {
-      type: "yui_message",
-      jobId,
-      text: yuiText,
-      emotion,
-      specialistId,
-    });
+    if (!isPendingConfirmation) {
+      pushToSession(sessionId, {
+        type: "yui_message",
+        jobId,
+        text: yuiText,
+        emotion,
+        specialistId,
+      });
+    }
 
     // 6.1 chat history 復元用に raw_messages にも assistant として保存
     // (主 Yui ターンの ack は chat/route.ts で別途保存済、これは voice formatter の追加発話)
@@ -224,7 +231,7 @@ async function runJobInner(args: {
     // 例外: 技術エラー voice (Spotify未連携 / Premium必須 等) は raw_messages に書かない。
     //       次ターンの Yui main が履歴を見て「未解決のエラーを継続言及」してくる事故を避ける
     //       (ephemeral 通知扱い)。SSE で発話・表示はされるが永続化しない。
-    if (!isTechError) {
+    if (!isTechError && !isPendingConfirmation) {
       void writeAssistantMessage({
         sessionId,
         source: "web",
