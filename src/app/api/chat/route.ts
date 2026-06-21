@@ -15,24 +15,20 @@ import {
   type ClientMessage,
 } from "@/lib/chat/context-builder";
 import {
+  persistChatTurn,
+  runPostPersistJobs,
+  saveUserImages,
+} from "@/lib/chat/persistence";
+import {
   buildQueryText,
   formatMemoryPrompt,
   loadAlwaysOnFacts,
   loadRecentSummaries,
   retrieveRelevant,
-  writeRawTurnPair,
-  writeAssistantMessage,
   type RetrievedChunk,
 } from "@/lib/memory";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 import { buildInternalDirectiveGuard } from "@/lib/internal-directive";
-import {
-  extractIncremental,
-  isSessionEnd,
-  ROLLING_THRESHOLD,
-  pendingExtractionCount,
-} from "@/lib/extract";
-import { reconcileNewChunks } from "@/lib/reconcile";
 import { tickMaintenance } from "@/lib/startup";
 import { buildEnvironmentBlock } from "@/lib/environment";
 import { db } from "@/db/client";
@@ -60,8 +56,6 @@ import {
 } from "@/lib/news";
 import { dispatchSpecialistJob } from "@/lib/jobs/dispatcher";
 import { judgeDispatch } from "@/lib/judge/dispatch-judge";
-import { summarizeUserImageBg } from "@/lib/image-summary";
-import { saveImage } from "@/lib/chat-attachments";
 import { clientError } from "@/lib/api-error";
 import { fetchUrl, searchWeb } from "@/lib/tools/web";
 import { pushToSession, pushDebugReport } from "@/lib/jobs/events";
@@ -1184,137 +1178,30 @@ async function handlePost(req: Request): Promise<Response> {
       );
     }
 
-    // 画像添付があれば、まずディスクに保存 → raw_messages.attachments に紐付け。
-    // 並行で Haiku に画像要約させて memory_chunks にも残す (後のターンで参照用)。
-    const savedAttachments: Array<{ filename: string; mediaType: string }> = [];
-    if (currentUserImages.length > 0) {
-      for (const img of currentUserImages) {
-        try {
-          const saved = await saveImage({
-            sessionId,
-            mediaType: img.mediaType,
-            base64Data: img.data,
-          });
-          savedAttachments.push(saved);
-        } catch (e) {
-          console.warn("[chat] saveImage failed:", e);
-        }
-      }
-      void summarizeUserImageBg({
-        sessionId,
-        images: currentUserImages,
-        userText: lastMsg.content,
-        assistantReply: reply,
-      });
-    }
+    const savedAttachments = await saveUserImages({
+      sessionId,
+      images: currentUserImages,
+      userText: lastMsg.content,
+      assistantReply: reply,
+    });
 
-    // プライベートモード判定: クライアント側で localStorage の vroid-user-state が
-    // "private" のとき。サーバの activity store に同じ state が来ているので、
-    // それを参照して private なら raw_messages を skip して overlay に書く。
-    // → 日記 / memory_chunks 抽出 / 記憶検索すべて DB 経由なので自動的に除外される。
-    const { getEffectiveState } = await import("@/lib/activity");
-    const effectiveUserState = await getEffectiveState(sessionId);
-    const isPrivate = effectiveUserState === "private";
-
-    // 書き込み先 (private なら Valkey overlay、それ以外なら raw_messages)
-    const writePromise = (async () => {
-      if (isPrivate) {
-        const { appendOverlay } = await import("@/lib/conversation-overlay");
-        const ts = Date.now();
-        // cron / timer source は user 側の trigger (内部発火
-        // ディレクティブ) を残さない (raw_messages 経路と同じ判断、§1179)。これが無いと private
-        // モードで <yui_directive> 完了報告プロンプトが user 発言として overlay に残り、
-        // リロード時にユーザー発言として表示されてしまう。
-        if (source !== "cron" && source !== "timer") {
-          await appendOverlay(sessionId, {
-            role: "user",
-            content: currentUserMsg,
-            kind: "private",
-            source,
-            ts,
-          });
-        }
-        await appendOverlay(sessionId, {
-          role: "assistant",
-          content: reply,
-          kind: "private",
-          source,
-          emotion,
-          ts: ts + 1, // user msg より僅か後、表示順安定のため
-          toolSummary: executedTools.length > 0 ? executedTools : undefined,
-        });
-        return;
-      }
-      // 通常モード: raw_messages へ書き込み (既存挙動)
-      if (source === "cron" || source === "timer") {
-        await writeAssistantMessage({ sessionId, source, content: reply, emotion });
-      } else {
-        await writeRawTurnPair({
-          sessionId,
-          source,
-          userMsg: currentUserMsg,
-          assistantMsg: reply,
-          emotion,
-          userAttachments: savedAttachments,
-          assistantToolSummary: executedTools,
-        });
-      }
-    })();
+    const writePromise = persistChatTurn({
+      sessionId,
+      source,
+      currentUserMsg,
+      reply,
+      emotion,
+      userAttachments: savedAttachments,
+      executedTools,
+    });
     void writePromise
-      .then(async () => {
-        // プライベートモードでは raw_messages にデータが無いので extract をスキップ
-        if (isPrivate) return;
-        // 食事ログ extract を予約 (debounce 5 分)。fire-and-forget。
-        try {
-          const { scheduleExtract } = await import("@/lib/food-extract");
-          void scheduleExtract(sessionId);
-        } catch (e) {
-          console.warn("[chat] food extract schedule failed:", e);
-        }
-        // 筋トレ extract も同じく予約。
-        try {
-          const { scheduleWorkoutExtract } = await import("@/lib/workout-extract");
-          void scheduleWorkoutExtract(sessionId);
-        } catch (e) {
-          console.warn("[chat] workout extract schedule failed:", e);
-        }
-        try {
-          let result: { count: number; newChunkIds: number[] } = {
-            count: 0,
-            newChunkIds: [],
-          };
-          if (isSessionEnd(currentUserMsg)) {
-            result = await extractIncremental({
-              sessionId,
-              minMessages: 1,
-              provisional: false,
-            });
-            console.log(`[chat] session-end extraction: ${result.count} items`);
-          } else {
-            const pending = await pendingExtractionCount(sessionId);
-            if (pending >= ROLLING_THRESHOLD) {
-              result = await extractIncremental({
-                sessionId,
-                minMessages: ROLLING_THRESHOLD,
-                provisional: true,
-              });
-              console.log(
-                `[chat] rolling extraction (pending=${pending}): ${result.count} items`
-              );
-            }
-          }
-
-          // 新規挿入があれば、矛盾解決をさらに background で起動
-          // (await しない: ここはすでに fire-and-forget の中なので、応答には影響しない)
-          if (result.newChunkIds.length > 0) {
-            void reconcileNewChunks(result.newChunkIds).catch((e) =>
-              console.warn("[chat] reconcile failed:", e)
-            );
-          }
-        } catch (e) {
-          console.warn("[chat] extraction failed:", e);
-        }
-      })
+      .then(({ isPrivate }) =>
+        runPostPersistJobs({
+          sessionId,
+          currentUserMsg,
+          isPrivate,
+        }),
+      )
       .catch((e) => console.warn("[chat] raw write failed:", e));
 
     pushDebugReport(sessionId, [`**source=${source}** \`${currentUserMsg.slice(0, 40)}\``, ...dbg]);
