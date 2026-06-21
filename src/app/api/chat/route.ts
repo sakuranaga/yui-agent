@@ -8,6 +8,13 @@ import {
 } from "@/lib/chat/response-renderer";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import {
+  buildApiMessages,
+  buildExecutorContext,
+  loadHistoryTimestamps,
+  type ClientImage,
+  type ClientMessage,
+} from "@/lib/chat/context-builder";
+import {
   buildQueryText,
   formatMemoryPrompt,
   loadAlwaysOnFacts,
@@ -28,9 +35,8 @@ import {
 import { reconcileNewChunks } from "@/lib/reconcile";
 import { tickMaintenance } from "@/lib/startup";
 import { buildEnvironmentBlock } from "@/lib/environment";
-import { chatTimestampMarker } from "@/lib/time";
 import { db } from "@/db/client";
-import { rawMessages, tasks } from "@/db/schema";
+import { tasks } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { yuiSpecialistTools } from "@/lib/specialists/registry";
 import {
@@ -201,23 +207,6 @@ function isValidTimerEvent(v: unknown): v is TimerEventPayload {
     typeof o.savedText === "string"
   );
 }
-
-type ClientImage = {
-  mediaType: "image/webp" | "image/png" | "image/jpeg" | "image/gif";
-  data: string; // base64 (no data URL prefix)
-};
-
-type ClientMessage = {
-  role: "user" | "assistant";
-  content: string;
-  images?: ClientImage[];
-  /** 過去 assistant ターンで実行した tool 呼び出しサマリ (idempotency 補強用) */
-  toolSummary?: Array<{ name: string; brief: string }>;
-  /** メッセージの作成時刻 (epoch ms)。client が history API の createdAt / 新規発話の Date.now()
-   *  を載せて送る。executor の時間窓 (古い依頼の再実行抑止) と #1 の時刻マーカーに使う。
-   *  未指定 (旧 client) はフォールバック (件数ベース / historyTimestamps)。 */
-  createdAt?: number;
-};
 
 type ConfirmedCalendarEventRef = {
   id: string;
@@ -780,64 +769,18 @@ async function handlePost(req: Request): Promise<Response> {
      // `[YYYY-MM-DD HH:mm JST]` の形で注入する。LLM は env block の現在時刻と
      // 差分を取ることで「何時間前」「何日前」を判断でき、過去の文脈 (例: 朝の
      // 「アラームセット + おやすみ」会話) を「いま起きてること」と混同するのを防ぐ。
-    let historyTimestamps: Date[] = [];
-    if (history.length > 0) {
-      try {
-        const rows = await db
-          .select({ createdAt: rawMessages.createdAt })
-          .from(rawMessages)
-          .where(eq(rawMessages.sessionId, sessionId))
-          .orderBy(desc(rawMessages.createdAt), desc(rawMessages.id))
-          .limit(history.length);
-        // DB は新しい順なので反転して history と同じ順序に揃える
-        historyTimestamps = rows.map((r) => new Date(r.createdAt)).reverse();
-      } catch (e) {
-        console.warn("[chat] history timestamps load failed:", e);
-      }
-    }
+    const historyTimestamps = await loadHistoryTimestamps({
+      sessionId,
+      historyLength: history.length,
+    });
 
     // 現在 user ターンの text 先頭に <yui_runtime_context> で env/memory を注入する (§8.11.3)。
     // 安定プレフィックス (system + 履歴) を壊さないため、注入は **DB 保存しない** (= 履歴には付かない)。
     // ユーザー本文が close タグを含む早期 close 注入を防ぐためエスケープ。
-    const RUNTIME_CLOSE = "</yui_runtime_context>";
-    // close タグの早期 close 注入を防ぐ無害化 (大小無視 → 角括弧表記)。
-    // ユーザー本文だけでなく dynamicContext (env の他 session preview・memory chunk 等、
-    // ユーザー由来文字列を含む) にも適用する (Codex 中)。
-    const escapeRuntimeClose = (s: string) => s.replace(/<\/yui_runtime_context>/gi, "[/yui_runtime_context]");
-    const injectRuntimeContext = (userText: string): string => {
-      if (!dynamicContext) return userText;
-      return `<yui_runtime_context>\n${escapeRuntimeClose(dynamicContext)}\n${RUNTIME_CLOSE}\n\n${escapeRuntimeClose(userText)}`;
-    };
-
-    const apiMessages: Anthropic.MessageParam[] = messages.map((m, idx) => {
-      const isCurrent = idx === messages.length - 1;
-      // 履歴メッセージにだけ時刻マーカー。現在の user 入力には付けない (今が現在時刻)。
-      // per-message createdAt を信頼源にし、無ければ historyTimestamps (position 対応) に
-      // フォールバック (assistant 単独行/merge で位置がズレうる旧経路、Codex 指摘の潜在バグ)。
-      const tsMs = !isCurrent ? (m.createdAt ?? historyTimestamps[idx]?.getTime()) : undefined;
-      const ts = tsMs !== undefined ? new Date(tsMs) : undefined;
-      const stamp = ts ? `[${chatTimestampMarker(ts)}] ` : "";
-      // 現在 user ターンの text にだけ runtime context (env/memory) を prepend。
-      const userText = isCurrent ? injectRuntimeContext(m.content) : `${stamp}${m.content}`;
-
-      if (m.images && m.images.length > 0 && m.role === "user") {
-        // 画像 N 枚 + テキストの content blocks 配列。テキストは末尾。
-        return {
-          role: "user" as const,
-          content: [
-            ...m.images.map((img) => ({
-              type: "image" as const,
-              source: {
-                type: "base64" as const,
-                media_type: img.mediaType,
-                data: img.data,
-              },
-            })),
-            { type: "text" as const, text: userText },
-          ],
-        };
-      }
-      return { role: m.role, content: userText };
+    const apiMessages = buildApiMessages({
+      messages,
+      dynamicContext,
+      historyTimestamps,
     });
     const pendingJobs: Array<{ jobId: number; specialist: string }> = [];
     // このターン中に実行した tool 呼び出しの要約 (raw_messages.tool_summary 用)。
@@ -885,66 +828,16 @@ async function handlePost(req: Request): Promise<Response> {
     //   画像依存の tool 起動 (画像を見て検索/保存/予定化) は現状 #2 が判断できない (Codex 実装 Medium)。
     // 【後回し (ユーザー判断: specialist 機構の再設計時)】judge skip かつ #1 未回答時の C 起動連携 (Codex 実装 High①)。
     // RECENT_HISTORY_TURNS は executor.ts のレバー参照、テストで調整。
-    const RECENT_HISTORY_TURNS = 3; // 件数上限 (volume / コスト cap)
-    const HISTORY_WINDOW_MINUTES = 5; // 時間窓: これより古いユーザー発話は #2 に渡さない
-    const histCutoffMs = Date.now() - HISTORY_WINDOW_MINUTES * 60_000;
-    // #2 (Executor) には **過去 N 分以内のユーザー発話 (= 依頼) のみ**を最大 K 件渡す。
-    // - user-only: assistant turn を入れると xLAM 等が persona を模倣 (「はい、かけましたよ」) し
-    //   ツールを選ばなくなる (実機確認)。照応 (「じゃ予定入れて」) は過去ユーザー発話だけで足りる。
-    // - 時間窓: 固定件数だけだと会話が疎な時に数時間前の依頼が紛れ込み、#2 が**過去依頼を再実行**
-    //   する (実機: 「音楽かけて」で 3.5h 前の牛乳リマインダーが再作成された)。源を時間窓で絞り、
-    //   dedup (tool_execution_log) は安全網として残す二段構え。
-    // - timestamp 取得失敗 (ts undefined) は件数ベースにフォールバック (= 旧挙動、回帰なし)。
-    const recentHistory: Anthropic.MessageParam[] = messages
-      .map((m, idx) => ({
-        m,
-        // per-message createdAt を信頼源にする。旧 client 等で無ければ historyTimestamps に
-        // フォールバック (= position 対応、ズレうるが従来挙動)。両方無ければ undefined。
-        tsMs: m.createdAt ?? historyTimestamps[idx]?.getTime(),
-        isCurrent: idx === messages.length - 1,
-      }))
-      .filter(
-        ({ m, tsMs, isCurrent }) =>
-          !isCurrent && // 現在の発話は下で必ず末尾に付ける
-          m.role !== "assistant" &&
-          (tsMs === undefined || tsMs >= histCutoffMs) // 窓内 (ts 無しは含める = フォールバック)
-      )
-      .slice(-RECENT_HISTORY_TURNS)
-      .map(({ m }) => ({
-        role: "user" as const,
-        content: typeof m.content === "string" ? m.content : String(m.content ?? ""),
-      }));
-    // 最新ユーザー発話を必ず末尾に (private mode 等で履歴が空/薄くても依頼が届くように)。
-    const lastRH = recentHistory[recentHistory.length - 1];
-    if (!lastRH || lastRH.content !== currentUserMsg) {
-      recentHistory.push({ role: "user", content: currentUserMsg });
-    }
+    const { recentHistory, runtimeFacts } = buildExecutorContext({
+      messages,
+      currentUserMsg,
+      historyTimestamps,
+      toolMode,
+      source,
+    });
     if (process.env.NODE_ENV !== "production") {
       console.log(`[executor-input] recentHistory=${recentHistory.length}件(user-only) last="${String(recentHistory[recentHistory.length - 1]?.content).slice(0, 30)}"`);
     }
-    // #2 (Executor) は履歴を user-only で受け取るため、「前ターンで実行済み」のシグナルが無く、
-    // 直近履歴に残る過去依頼 (例: コーラのリマインダー) を再実行しがち。直近 N 分の assistant 行の
-    // toolSummary (= そのターンで実行したツール) を runtimeFacts に明示し、再実行を抑止する (修正 A)。
-    const execNoteCutoffMs = Date.now() - HISTORY_WINDOW_MINUTES * 60_000;
-    const recentExecuted = messages
-      .map((m, idx) => ({ m, tsMs: m.createdAt ?? historyTimestamps[idx]?.getTime() }))
-      .filter(
-        ({ m, tsMs }) =>
-          m.role === "assistant" &&
-          !!m.toolSummary?.length &&
-          (tsMs === undefined || tsMs >= execNoteCutoffMs),
-      )
-      .flatMap(({ m }) => m.toolSummary!.map((t) => (t.brief ? `${t.name}(${t.brief})` : t.name)));
-    const executedNote =
-      recentExecuted.length > 0
-        ? `\n直近で実行済み (= 既に完了。同じ依頼を再実行/蒸し返さない): ${recentExecuted.join(", ")}`
-        : "";
-
-    const runtimeFacts = [
-      `現在時刻: ${chatTimestampMarker(new Date())}`,
-      `mode: ${toolMode}`,
-      `source: ${source}`,
-    ].join("\n") + executedNote;
 
     // ── specialist 橋渡し: #2 が ask_*_specialist を選んだら既存 judge + dispatchSpecialistJob へ ──
     // (specialist パイプライン = 独自モデル sub-agent + SSE/voice/pendingJobs は温存。書き換えない)
