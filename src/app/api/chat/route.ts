@@ -30,7 +30,6 @@ import { eq, desc } from "drizzle-orm";
 import { yuiSpecialistTools } from "@/lib/specialists/registry";
 import {
   toolsForContext,
-  toAnthropicTools,
   buildSystemGuards,
 } from "@/lib/tools/runtime";
 import { createDispatchLedger } from "@/lib/tools/dispatch";
@@ -40,11 +39,7 @@ import {
   type ExtraToolHandler,
 } from "@/lib/tools/executor";
 import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
-import {
-  NO_TOOL_NAME,
-  SELECT_TOOL_NAME,
-  SELECT_TOOL_DESCRIPTION,
-} from "@/lib/tools/dispatch-prompts";
+import { decideToolGate, type ToolGateDecision } from "@/lib/tools/gate";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
@@ -239,14 +234,14 @@ function buildPendingJobAck(
   userText: string,
 ): string {
   const specialists = new Set(jobs.map((j) => j.specialist));
-  if (specialists.has("schedule")) {
+  if (specialists.has("schedule") || specialists.has("ask_schedule_specialist")) {
     if (/明日.*(予定|スケジュール|カレンダー)|(予定|スケジュール|カレンダー).*明日/.test(userText)) {
       return "あら、明日のご予定ですね。お調べしますので、少しお待ちください。";
     }
     return "ご予定をお調べしますので、少しお待ちください。";
   }
-  if (specialists.has("mail")) return "メールを確認しますので、少しお待ちください。";
-  if (specialists.has("research")) return "お調べしますので、少しお待ちください。";
+  if (specialists.has("mail") || specialists.has("ask_mail_specialist")) return "メールを確認しますので、少しお待ちください。";
+  if (specialists.has("research") || specialists.has("ask_research_specialist")) return "お調べしますので、少しお待ちください。";
   return "確認しますので、少しお待ちください。";
 }
 
@@ -843,22 +838,6 @@ async function handlePost(req: Request): Promise<Response> {
         .join("")
         .trim();
 
-    // v4 stage3 (docs/chat-executor-realign-v4.md): #1 の pick (select_tool 疑似ツール) 抽出。
-    // #1 は発話(text)と一緒に select_tool で「この発話で使うべきツール」を1つ選ぶ。no_tool=雑談。
-    // 現状は **shadow** = ログ + L2 判定のみで、#2 の prior には未注入 (挙動・並列は据え置き)。
-    // 名前/説明文は dispatch-prompts.ts に集約 (#2 の EXECUTOR_SYSTEM と同一ファイル)。
-    const extractPicks = (m: Anthropic.Message): string[] =>
-      m.content
-        .filter(
-          (b): b is Anthropic.ToolUseBlock =>
-            b.type === "tool_use" && b.name === SELECT_TOOL_NAME,
-        )
-        .map((b) => {
-          const n = (b.input as { tool_name?: unknown })?.tool_name;
-          return typeof n === "string" ? n : "";
-        })
-        .filter((n) => n.length > 0);
-
     // #2 (Executor) に渡す入力 (v3、§4.0)。trusted/untrusted 分離:
     //   - 履歴は **生の `messages`** (= env/memory 注入前) を text のみで渡す → 検索結果/メール/記憶が
     //     #2 のツール起動材料にならない (apiMessages を生で渡さない、Codex v3 High①)。
@@ -995,21 +974,36 @@ async function handlePost(req: Request): Promise<Response> {
       };
     };
 
-    // ── #1(発話, tools 無し) ∥ #2(Executor: ツール選択・実行) を並列起動 (v3) ──
-    //   #2 は #1 を待たない・#1 の出力(ack)を使わない。tool_confirm_result mode は #2 を回さない。
-    const runExec = !isToolConfirmMode && (registryTools.length > 0 || exposedSpecialistTools.length > 0);
-    // pick (select_tool) と L2 は **ユーザー発起ターン専用**。cron/timer/tool_confirm_result の
-    // system speak (song-change の曲紹介・お便り・発火 speak 等) では #1 に select_tool を付けない
-    // (素の #1 が発話を生成する。pick を付けると #1 が紹介文を返さず空 reply→502 になる実機バグ)。
+    // v5 Tool Gate: 通常 web user turn だけ先に no_tool / tool_required を判定する。
+    // tool_required の時は main の自由応答を止め、ツール結果前の事実誤答を構造的に防ぐ。
+    const canRunExec = !isToolConfirmMode && (registryTools.length > 0 || exposedSpecialistTools.length > 0);
     const isUserTurn =
       source !== "cron" && source !== "timer" && source !== "tool_confirm_result";
+    let gateDecision: ToolGateDecision = {
+      decision: "no_tool",
+      category: "chat",
+      waitPolicy: "wait",
+      confidence: 1,
+      reason: "gate skipped for non-user/internal turn",
+    };
+    if (canRunExec && isUserTurn) {
+      gateDecision = await decideToolGate({
+        currentUserMsg,
+        recentHistory,
+        runtimeFacts,
+      });
+    }
+    const runExec = canRunExec && gateDecision.decision === "tool_required";
+    dbg.push(
+      `- gate: ${gateDecision.decision} category=${gateDecision.category} wait=${gateDecision.waitPolicy} confidence=${gateDecision.confidence.toFixed(2)}${gateDecision.fallback ? ` fallback=${gateDecision.fallback}` : ""}`,
+    );
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `[tool-gate] ${gateDecision.decision} category=${gateDecision.category} wait=${gateDecision.waitPolicy} confidence=${gateDecision.confidence.toFixed(2)} reason="${gateDecision.reason.slice(0, 80)}"`,
+      );
+    }
 
-    // v4 stage1 (docs/chat-executor-realign-v4.md §8): retrieval を **共有の単一計算**に hoist。
-    // 従来は #2 ブランチ内で実行していたが、後続 stage で #1 もこの候補集合を使うため前段の
-    // 単一 promise にする。ここでは **#1 と並列に開始し #2 が await** するだけなので、挙動も
-    // レイテンシも不変 (#1 の critical path に retrieval は乗らない)。本格的な逐次化 (#1 が pick
-    // のため retrieval を待つ) は stage4。失敗 / full-catalog / 候補空は registryTools のまま (安全側)。
-    // specialist umbrella (exposedSpecialistTools) は retrieval 対象外で常に全件渡す (削らない = 安全)。
+    // Tool retrieval: Executor を走らせる時だけ候補を絞る。specialist umbrella は常時同梱。
     const executorToolsPromise: Promise<typeof registryTools> = (async () => {
       if (!runExec || registryTools.length === 0) return registryTools;
       let executorTools = registryTools;
@@ -1035,123 +1029,70 @@ async function handlePost(req: Request): Promise<Response> {
       return executorTools;
     })();
 
-    const [bResp, exec] = await Promise.all([
-      // #1 (発話 + pick shadow): 共有 retrieval 候補から select_tool で1つ pick (必ず no_tool 含む)。
-      // pick は shadow = L2 判定とログのみ。#2 の prior には未注入なので並列・挙動は据え置き (stage3)。
-      // **ユーザー発起ターンのみ** select_tool を付ける。system speak (cron/timer) は素の #1 で発話生成。
-      runExec && isUserTurn
-        ? (async () => {
-            const candidates = await executorToolsPromise;
-            const pickNames = Array.from(
-              new Set([
-                ...candidates.map((t) => t.name),
-                ...exposedSpecialistTools.map((t) => t.name),
-                NO_TOOL_NAME,
-              ]),
-            );
-            const selectTool: Anthropic.Tool = {
-              name: SELECT_TOOL_NAME,
-              description: SELECT_TOOL_DESCRIPTION, // dispatch-prompts.ts に集約
-              input_schema: {
-                type: "object",
-                properties: { tool_name: { type: "string", enum: pickNames } },
-                required: ["tool_name"],
-              },
-            };
-            return callLlm("main", {
-              system: systemBlocks,
-              messages: apiMessages,
-              tools: [selectTool],
-            });
-          })()
-        : callLlm("main", { system: systemBlocks, messages: apiMessages }), // #1 (pick 無し: confirm mode 等)
-      runExec
-        ? (async () => {
-            // 共有 retrieval (前段で #1 と並列に開始済み) の結果を await。
-            const executorTools = await executorToolsPromise;
-            // executor が **既知の function-calling 専用モデル (xLAM 等)** なら single-pass で回す
-            // (tool_result を含む 2 回目を呼ばない = multi-turn 非対応の 500/無駄呼び出しを回避)。
-            // provider 全体 (local_openai) で判定すると multi-turn 可能なローカルモデルの依存チェーンを
-            // 静かに捨てるので model-id allowlist に限定 (Codex High)。allowlist 外は multi-turn で回す。
-            // multi-turn 不可な allowlist 外モデルは graceful catch (llm_error) でチャット全体の 500 は防ぐが、
-            // **依存チェーンの完遂は保証しない** (llm_error は aggregateForReport で未完了注記される、Codex Medium)。
-            // 注: callLlm の primary 失敗 fallback で実モデルがズレる稀ケースも同様に backstop/注記で扱う。
-            const execEntry = await resolveEntry("executor").catch(() => null);
-            const singlePass = /xlam|functionary|gorilla/i.test(execEntry?.entry.modelId ?? "");
-            // xLAM 等の function-calling 専用モデルは**多ターン履歴で値を混同**する (実機確認:
-            // 履歴に過去の「タイマー10分」があると最新の「5分」を無視して 10 を拾う)。
-            // → single-pass モデルには **現発話のみ**渡す。multi-turn 対応モデル (native) は
-            // 文脈 (「じゃ予定入れて」等の照応) のため user-only 履歴を渡す。
-            const execHistory = singlePass
-              ? [{ role: "user" as const, content: currentUserMsg }]
-              : recentHistory;
-            const runOnce = (tools: typeof registryTools) =>
-              runExecutor({
-                recentHistory: execHistory, // single-pass=現発話のみ / それ以外=user-only 履歴
-                runtimeFacts, // trusted: 現在時刻/mode/source (ack を使わないので明示)
-                tools,
-                singlePass,
-                ctx: mainCtx,
-                ledger: dispatchLedger,
-                // #2 のツール選択は executor role = tool tier (xLAM 等の専用モデル、設定で割当)。
-                // 未割当なら sub fallback / 防御 Haiku に倒れる (ネイティブ tool-use で動く)。
-                complete: async ({ system, messages: m, tools: t }) => {
-                  const r = await callLlm("executor", { system, messages: m, tools: t });
-                  accUsage(r);
-                  return r;
-                },
-                extraTools: exposedSpecialistTools,
-                onExtraTool,
-              });
-            let result = await runOnce(executorTools);
-            // 絞った候補で #2 が no_tool_calls を返し、かつ action-intent っぽければ、正解ツールが
-            // 候補から漏れた silent miss を疑い full registryTools で 1 回だけ再試行 (§12.2 retrieval fallback)。
-            // ledger 共有なので二重実行は idempotency で防がれる (初回は何も実行していない)。
-            // 再試行は「**何も実行されなかった**」時のみ。multi-turn (Haiku 等) は成功しても
-            // 最終 iteration が no_tool_calls で終わるため、stopReason で判定すると「実行済みなのに
-            // 再試行 → 二重実行」になる (実機: カレンダー予定が 2 回作成)。outcomes 空で判定する。
-            // declined (#2 が no_tool を明示選択 = 行動不要と判断) は再試行しない。full で
-            // 無理に拾わせると decline を覆して誤実行/再実行になる。no_tool_calls (拾えなかった)
-            // のみ narrowing miss を疑って再試行する。
-            const narrowed = executorTools.length < registryTools.length;
-            if (
-              narrowed &&
-              result.outcomes.length === 0 &&
-              result.stopReason !== "declined" &&
-              isActionIntent(currentUserMsg)
-            ) {
-              if (process.env.NODE_ENV !== "production") {
-                console.log("[tool-retrieval] no_tool_calls + action-intent → full catalog 再試行");
-              }
-              result = await runOnce(registryTools);
-            }
-            return result;
-          })()
-        : Promise.resolve(null),
-    ]);
-    accUsage(bResp);
-    response = bResp;
-    let ackText = textOf(bResp);
+    let exec: Awaited<ReturnType<typeof runExecutor>> | null = null;
+    let ackText = "";
+    let finalIterText = "";
+    let didMainFallback = false;
 
-    // v4 stage3: #1 の pick を抽出 (shadow)。pick != no_tool = #1 が「行動が要る」と判断。
-    // 現状は L2 判定 + ログのみ (#2 prior には未注入)。複数 pick なら no_tool 以外が1つでもあれば行動。
-    const picks = extractPicks(bResp);
-    const pickedAction = picks.some((p) => p !== NO_TOOL_NAME);
-    if (process.env.NODE_ENV !== "production" && picks.length > 0) {
-      console.log(`[pick-shadow] #1 picks=[${picks.join(",")}] action=${pickedAction}`);
+    if (!runExec) {
+      const bResp = await callLlm("main", { system: systemBlocks, messages: apiMessages });
+      accUsage(bResp);
+      response = bResp;
+      ackText = textOf(bResp);
+      if (ackText) {
+        accumulatedTexts.push(ackText);
+        finalIterText = ackText;
+      }
+    } else {
+      const executorTools = await executorToolsPromise;
+      const execEntry = await resolveEntry("executor").catch(() => null);
+      const singlePass = /xlam|functionary|gorilla/i.test(execEntry?.entry.modelId ?? "");
+      const execHistory = singlePass
+        ? [{ role: "user" as const, content: currentUserMsg }]
+        : recentHistory;
+      const runOnce = (tools: typeof registryTools) =>
+        runExecutor({
+          recentHistory: execHistory,
+          runtimeFacts,
+          tools,
+          singlePass,
+          ctx: mainCtx,
+          ledger: dispatchLedger,
+          complete: async ({ system, messages: m, tools: t }) => {
+            const r = await callLlm("executor", { system, messages: m, tools: t });
+            accUsage(r);
+            return r;
+          },
+          extraTools: exposedSpecialistTools,
+          onExtraTool,
+        });
+      exec = await runOnce(executorTools);
+      const narrowed = executorTools.length < registryTools.length;
+      if (
+        narrowed &&
+        exec.outcomes.length === 0 &&
+        exec.stopReason !== "declined" &&
+        isActionIntent(currentUserMsg)
+      ) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log("[tool-retrieval] no_tool_calls + action-intent → full catalog 再試行");
+        }
+        exec = await runOnce(registryTools);
+      }
+      // Gate false positive: Executor が明示 no_tool なら通常会話へ戻す。
+      if (exec.outcomes.length === 0 && exec.stopReason === "declined") {
+        dbg.push("- gate fallback: executor declined → main 通常応答へ復帰");
+        const bResp = await callLlm("main", { system: systemBlocks, messages: apiMessages });
+        accUsage(bResp);
+        response = bResp;
+        didMainFallback = true;
+        ackText = textOf(bResp);
+        if (ackText) {
+          accumulatedTexts.push(ackText);
+          finalIterText = ackText;
+        }
+      }
     }
-    dbg.push(
-      isUserTurn
-        ? `- #1 pick: [${picks.join(",") || "なし"}] action=${pickedAction}`
-        : `- #1 pick: (system turn = pick 無効)`,
-    );
-    // #1 が text 無しで select_tool のみ返した場合の固定 ack 補完 (空 reply での 502 を防ぐ、設計 §4.2)。
-    if (!ackText && picks.length > 0) {
-      ackText = pickedAction ? "はい、対応しますね。" : "はい。";
-      console.warn(`[chat] #1 returned no text (picks=[${picks.join(",")}]) → 固定 ack 補完`);
-    }
-    if (ackText) accumulatedTexts.push(ackText);
-    let finalIterText = ackText;
 
     if (exec) {
       toolCallCount += exec.outcomes.length;
@@ -1170,15 +1111,15 @@ async function handlePost(req: Request): Promise<Response> {
 
       // ── C: report/失敗/pending/打ち切り があれば結果を踏まえて報告 (tools 無し) ──
       // L2 安全網: 行動が期待されたのに #2 が 0 実行 → 必ず正直な C で報告 (docs §4.5)。
-      // 主信号は #1 の pick (pickedAction)。#1 が pick を1つも出さなかった時のみ isActionIntent に
-      // フォールバック (#1 が no_tool を選んだ=雑談なら isActionIntent は見ない → 誤報告を回避)。
+      // 主信号は Gate の tool_required。Executor が明示 declined して main fallback 済みなら雑談として扱う。
       // **ユーザー発起ターンのみ** (isUserTurn、上で定義)。cron/timer/tool_confirm_result の
       // system speak (song-change の曲紹介等) は 0 実行が正常なので L2 を効かせない (実機: 曲紹介で謝罪が出た)。
-      const noPick = picks.length === 0;
       const actionMissed =
         isUserTurn &&
+        gateDecision.decision === "tool_required" &&
+        !didMainFallback &&
         exec.outcomes.length === 0 &&
-        (pickedAction || (noPick && isActionIntent(currentUserMsg)));
+        exec.stopReason !== "declined";
       const { text: resultsText, needsC } = aggregateForReport(
         exec.outcomes,
         exec.stopReason,
@@ -1214,7 +1155,7 @@ async function handlePost(req: Request): Promise<Response> {
 
     const tClaudeMs = Date.now() - tClaudeStart;
 
-    if (!response) {
+    if (!response && !finalIterText && pendingJobs.length === 0 && toolCallCount === 0) {
       return Response.json({ error: "no response from claude" }, { status: 502 });
     }
 
@@ -1235,10 +1176,10 @@ async function handlePost(req: Request): Promise<Response> {
 
     if (!reply) {
       console.warn(
-        `[chat] empty reply (stop_reason=${response.stop_reason}, tool_calls=${toolCallCount})`
+        `[chat] empty reply (stop_reason=${response?.stop_reason ?? "none"}, tool_calls=${toolCallCount})`
       );
       return Response.json(
-        { error: "empty reply from claude", stop_reason: response.stop_reason },
+        { error: "empty reply from claude", stop_reason: response?.stop_reason ?? "none" },
         { status: 502 }
       );
     }

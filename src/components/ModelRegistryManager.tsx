@@ -78,6 +78,7 @@ const ROLE_META: Array<{ role: string; label: string; tier: TierName }> = [
   { role: "notify", label: "進捗連絡整形", tier: "sub" },
   { role: "intent", label: "ツール間変換", tier: "sub" },
   { role: "project_suggest", label: "プロジェクト提案", tier: "sub" },
+  { role: "tool_gate", label: "ツール要否判定", tier: "tool" },
   { role: "executor", label: "ツール選択 (#2 Executor)", tier: "tool" },
   { role: "specialist", label: "専門エージェント", tier: "heavy" },
 ];

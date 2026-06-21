@@ -49,6 +49,7 @@ export type LlmRole =
   | "notify"        // MCP notify: 開発エージェントの進捗連絡 → 結衣口調に整形 (ローカル優先 + Haiku fallback)
   | "intent"        // cross-tool 変換 (artifact → 別ツールの下書き JSON、ローカル優先)
   | "project_suggest" // artifact → 関連プロジェクト提案 (ローカル優先)
+  | "tool_gate"    // ツール要否の軽量 gate (no_tool / tool_required)
   | "executor"     // Executor #2 のツール選択 (tool tier = xLAM 等の function-calling 専用モデル)
   | "specialist";  // specialist 個別呼び出し (model は spec.model で上書き)
 
@@ -73,6 +74,7 @@ const DEFAULT_ROLE_TIER: Record<LlmRole, TierName> = {
   notify: "sub",
   intent: "sub",
   project_suggest: "sub",
+  tool_gate: "tool",
   executor: "tool", // #2 ツール選択は tool tier (未割当なら sub fallback / 防御 Haiku)
   specialist: "heavy",
 };
@@ -453,4 +455,3 @@ export async function callLlm(role: LlmRole, opts: CallLlmOpts): Promise<Anthrop
     throw primaryErr;
   }
 }
-
