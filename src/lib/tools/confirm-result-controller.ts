@@ -9,6 +9,9 @@ import { getEffectiveState } from "@/lib/activity";
 import { appendOverlay } from "@/lib/conversation-overlay";
 import { writeAssistantMessage } from "@/lib/memory";
 import { cacheSetIfAbsent } from "@/lib/cache";
+import { db } from "@/db/client";
+import { tasks } from "@/db/schema";
+import { sql } from "drizzle-orm";
 
 const FINAL_VOICE_TTL_SEC = 24 * 60 * 60;
 
@@ -24,6 +27,45 @@ export type ConfirmResultControllerInput = {
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+async function updateTaskFinalReply(args: {
+  token: string;
+  reply: string;
+  emotion: string;
+}): Promise<void> {
+  try {
+    const updated = await db.execute(sql`
+      UPDATE ${tasks}
+      SET output = jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            COALESCE(output, '{}'::jsonb),
+            '{yuiText}',
+            to_jsonb(${args.reply}::text),
+            true
+          ),
+          '{emotion}',
+          to_jsonb(${args.emotion}::text),
+          true
+        ),
+        '{confirmFinal}',
+        COALESCE(output->'confirmFinal', '{}'::jsonb) || jsonb_build_object(
+          'reply', ${args.reply}::text,
+          'emotion', ${args.emotion}::text,
+          'replyEmittedAt', now()
+        ),
+        true
+      )
+      WHERE output->'confirmFinal'->>'token' = ${args.token}::text
+      RETURNING id
+    `);
+    if (updated.length === 0) {
+      console.warn(`[tool-confirm/${args.token}] final reply task update matched no rows`);
+    }
+  } catch (e) {
+    console.warn(`[tool-confirm/${args.token}] final reply task update failed:`, e);
+  }
 }
 
 function formatJstDateLabel(ymd: string): string {
@@ -207,6 +249,11 @@ export async function emitConfirmResult(input: ConfirmResultControllerInput): Pr
   const reply = sanitizeAssistantText(await generateConfirmResultReply(input)) || "かしこまりました。";
   const emotion = classifyEmotion(reply);
   const toolSummary = buildConfirmToolSummary(input);
+  await updateTaskFinalReply({
+    token: input.token,
+    reply,
+    emotion,
+  });
 
   pushToSession(input.sessionId, {
     type: "yui_message",

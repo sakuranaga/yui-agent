@@ -91,6 +91,14 @@ function unknownToolOutcome(args: {
   };
 }
 
+function buildPendingConfirmationText(outcomes: UnifiedToolOutcome[]): string {
+  const pending = outcomes.find((o) => o.state === "pending_confirmation");
+  const summary = pending?.confirmation?.summary;
+  if (summary) return `結論: 確認必要 — ${summary}`;
+  if (pending) return `結論: 確認必要 — ${pending.toolName}`;
+  return "結論: 確認必要";
+}
+
 /**
  * specialist のループ runner。v3 ツール基盤統合: spec.tools の SpecialistTool[] 経路を
  * 廃止し、registry から caller={kind:"specialist", id: spec.id} の tool を取得して
@@ -256,6 +264,24 @@ export async function runSpecialist(
     );
     const results = executed.map((r) => r.result);
     outcomes.push(...executed.map((r) => r.outcome));
+
+    if (executed.some((r) => r.outcome.state === "pending_confirmation")) {
+      return {
+        text: buildPendingConfirmationText(outcomes),
+        state: "pending_confirmation",
+        outcomes,
+        stats: {
+          llmCalls,
+          toolCalls,
+          totalInputTokens: inTokens,
+          totalOutputTokens: outTokens,
+          cacheReadTokens: cacheR,
+          cacheWriteTokens: cacheW,
+          durationMs: Date.now() - t0,
+          truncated,
+        },
+      };
+    }
 
     messages.push({ role: "user", content: results });
   }

@@ -239,7 +239,7 @@ function requestsScheduleDelete(text: string): boolean {
 }
 
 function refersToRecentTarget(text: string): boolean {
-  return /(その|この|さっき|先ほど|直前|今(?:登録|追加|作成)した|いま(?:登録|追加|作成)した)/u.test(text);
+  return /(その|この|さっき|先ほど|直前|今(?:登録|追加|作成|入れ)た?|いま(?:登録|追加|作成|入れ)た?)/u.test(text);
 }
 
 function extractConfirmedCalendarEvent(output: unknown): ConfirmedCalendarEventRef | null {
@@ -1022,6 +1022,7 @@ async function handlePost(req: Request): Promise<Response> {
         const recentCreatedEvent = await findLatestConfirmedCalendarCreate(sessionId);
         if (recentCreatedEvent) {
           query = buildExplicitDeleteQuery(recentCreatedEvent, query);
+          input.query = query;
           dbg.push(
             `- schedule reference resolved: delete event_id=${recentCreatedEvent.id} title=${recentCreatedEvent.summary ?? "(no title)"}`,
           );
