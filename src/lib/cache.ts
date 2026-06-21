@@ -88,6 +88,25 @@ export async function cacheSet<T>(key: string, value: T, ttlSec: number): Promis
   }
 }
 
+export async function cacheSetIfAbsent<T>(
+  key: string,
+  value: T,
+  ttlSec: number
+): Promise<boolean> {
+  if (!(await ensureReady())) return true;
+  try {
+    const serialized = JSON.stringify(value);
+    const result =
+      ttlSec > 0
+        ? await getClient().set(k(key), serialized, "EX", ttlSec, "NX")
+        : await getClient().set(k(key), serialized, "NX");
+    return result === "OK";
+  } catch (e) {
+    console.warn(`[cache] setnx(${key}) failed:`, e instanceof Error ? e.message : e);
+    return true;
+  }
+}
+
 export async function cacheDel(...keys: string[]): Promise<void> {
   if (keys.length === 0) return;
   if (!(await ensureReady())) return;

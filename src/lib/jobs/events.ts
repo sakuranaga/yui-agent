@@ -132,6 +132,7 @@ export type ToolConfirmRequestEvent = {
 export type ToolConfirmResultEvent = {
   type: "tool_confirm_result";
   token: string;
+  toolName?: string;
   success: boolean;
   result?: unknown;
   reason?: string;

@@ -25,7 +25,7 @@ import { tickMaintenance } from "@/lib/startup";
 import { buildEnvironmentBlock } from "@/lib/environment";
 import { chatTimestampMarker } from "@/lib/time";
 import { db } from "@/db/client";
-import { rawMessages } from "@/db/schema";
+import { rawMessages, tasks } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { yuiSpecialistTools } from "@/lib/specialists/registry";
 import {
@@ -113,21 +113,7 @@ import {
 const HISTORY_TURNS = parseInt(process.env.CHAT_HISTORY_TURNS ?? "8", 10);
 const RETRIEVAL_TOP_K = parseInt(process.env.RETRIEVAL_TOP_K ?? "5", 10);
 
-type Source = "web" | "discord_text" | "discord_voice" | "cron" | "timer" | "tool_confirm_result";
-
-/**
- * confirm 完了 (Phase B、§4.5) の payload。chat に再 turn を要求する時に body に乗る。
- * 通常 user message は無し (= messages: [])。確認完了報告は通常 chat 経路から隔離し、
- * tool result / summary だけを材料にした短い LLM 報告にする。
- */
-type ToolConfirmResultPayload = {
-  token: string;
-  toolName: string;
-  summary: string;
-  success: boolean;
-  result: unknown;
-  reason: string | null;
-};
+type Source = "web" | "discord_text" | "discord_voice" | "cron" | "timer";
 
 /**
  * timer/alarm 発火時に dispatcher (lib/timers.ts) から渡される event payload。
@@ -229,6 +215,83 @@ type ClientMessage = {
    *  未指定 (旧 client) はフォールバック (件数ベース / historyTimestamps)。 */
   createdAt?: number;
 };
+
+type ConfirmedCalendarEventRef = {
+  id: string;
+  calendarId?: string;
+  summary?: string;
+  startJst?: string;
+  endJst?: string;
+  start?: unknown;
+  end?: unknown;
+};
+
+function asPlainRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function stringValue(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+function requestsScheduleDelete(text: string): boolean {
+  return /(予定|スケジュール|カレンダー|アポ|予約).*(削除|消し|キャンセル|取消|取り消)|(?:削除|消し|キャンセル|取消|取り消).*(予定|スケジュール|カレンダー|アポ|予約)/u.test(text);
+}
+
+function refersToRecentTarget(text: string): boolean {
+  return /(その|この|さっき|先ほど|直前|今(?:登録|追加|作成)した|いま(?:登録|追加|作成)した)/u.test(text);
+}
+
+function extractConfirmedCalendarEvent(output: unknown): ConfirmedCalendarEventRef | null {
+  const root = asPlainRecord(output);
+  const confirmFinal = asPlainRecord(root?.confirmFinal);
+  if (!confirmFinal || confirmFinal.toolName !== "gcal_create_event" || confirmFinal.success !== true) {
+    return null;
+  }
+  const result = asPlainRecord(confirmFinal.result);
+  const event = asPlainRecord(result?.event);
+  const id = stringValue(event?.id);
+  if (!event || !id) return null;
+  return {
+    id,
+    calendarId: stringValue(event.calendar_id) ?? stringValue(event.calendarId),
+    summary: stringValue(event.summary),
+    startJst: stringValue(event.start_jst),
+    endJst: stringValue(event.end_jst),
+    start: event.start,
+    end: event.end,
+  };
+}
+
+async function findLatestConfirmedCalendarCreate(
+  sessionId: string
+): Promise<ConfirmedCalendarEventRef | null> {
+  const rows = await db
+    .select({ output: tasks.output })
+    .from(tasks)
+    .where(eq(tasks.sessionId, sessionId))
+    .orderBy(desc(tasks.createdAt), desc(tasks.id))
+    .limit(20);
+  for (const row of rows) {
+    const event = extractConfirmedCalendarEvent(row.output);
+    if (event) return event;
+  }
+  return null;
+}
+
+function buildExplicitDeleteQuery(event: ConfirmedCalendarEventRef, originalQuery: string): string {
+  const parts = [
+    "直近に登録完了した次の1件だけを削除して。",
+    `event_id=${event.id}`,
+    `calendar_id=${event.calendarId ?? "primary"}`,
+  ];
+  if (event.summary) parts.push(`title="${event.summary}"`);
+  if (event.startJst) parts.push(`start_jst=${event.startJst}`);
+  if (event.endJst) parts.push(`end_jst=${event.endJst}`);
+  parts.push("他の候補を検索してまとめて削除しない。該当 event_id の1件だけを対象にする。");
+  if (originalQuery) parts.push(`元の依頼: ${originalQuery}`);
+  return parts.join(" ");
+}
 
 function buildPendingJobAck(
   jobs: Array<{ jobId: number; specialist: string }>,
@@ -347,107 +410,8 @@ async function isApiKeyConfigured(): Promise<boolean> {
 function isValidSource(s: unknown): s is Source {
   return (
     typeof s === "string" &&
-    ["web", "discord_text", "discord_voice", "cron", "timer", "tool_confirm_result"].includes(s)
+    ["web", "discord_text", "discord_voice", "cron", "timer"].includes(s)
   );
-}
-
-function isValidToolConfirmResult(v: unknown): v is ToolConfirmResultPayload {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.token === "string" &&
-    typeof o.toolName === "string" &&
-    typeof o.summary === "string" &&
-    typeof o.success === "boolean"
-  );
-}
-
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-}
-
-function formatConfirmEventTime(start: unknown, end: unknown): string {
-  const s = asRecord(start);
-  const e = asRecord(end);
-  if (!s) return "";
-  if (typeof s.date === "string") {
-    return `${formatJstDateLabel(s.date)}、終日`;
-  }
-  if (typeof s.dateTime !== "string") return "";
-  const sd = new Date(s.dateTime);
-  if (Number.isNaN(sd.getTime())) return s.dateTime;
-  const dateKey = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "Asia/Tokyo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(sd);
-  const startTime = formatJstClock(sd);
-  let endTime = "";
-  if (e && typeof e.dateTime === "string") {
-    const ed = new Date(e.dateTime);
-    if (!Number.isNaN(ed.getTime())) {
-      const endDateKey = new Intl.DateTimeFormat("sv-SE", {
-        timeZone: "Asia/Tokyo",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(ed);
-      if (endDateKey === dateKey) endTime = formatJstClock(ed);
-    }
-  }
-  return `${formatJstDateLabel(dateKey)}、${startTime}${endTime ? `から${endTime}まで` : "から"}`;
-}
-
-function formatJstDateLabel(ymd: string): string {
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "Asia/Tokyo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const today = fmt.format(now);
-  const tomorrowDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const tomorrow = fmt.format(tomorrowDate);
-  if (ymd === today) return "今日";
-  if (ymd === tomorrow) return "明日";
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
-  if (!m) return ymd;
-  return `${Number(m[2])}月${Number(m[3])}日`;
-}
-
-function formatJstClock(d: Date): string {
-  const parts = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(d);
-  const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
-  const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
-  return m === 0 ? `${h}時` : `${h}時${String(m).padStart(2, "0")}分`;
-}
-
-function buildToolConfirmFallbackReply(result: ToolConfirmResultPayload): string {
-  if (!result.success) {
-    if (result.reason === "user denied") {
-      return `承知しました。${result.summary}はやめておきます。`;
-    }
-    return `申し訳ございません。${result.summary}を実行できませんでした。${result.reason ? `理由は ${result.reason} です。` : ""}`.trim();
-  }
-
-  const root = asRecord(result.result);
-  const event = asRecord(root?.event);
-  if (result.toolName === "gcal_create_event" && event) {
-    const title = typeof event.summary === "string" ? event.summary : "予定";
-    const location = typeof event.location === "string" && event.location ? event.location : "";
-    const when = formatConfirmEventTime(event.start, event.end);
-    const target = `${location ? `${location}での` : ""}${title}`;
-    return `かしこまりました。${when ? `${when}、` : ""}${target}の予定を登録いたしました。`;
-  }
-
-  return `かしこまりました。${result.summary}が完了しました。`;
 }
 
 function textOfMessage(m: Anthropic.Message): string {
@@ -458,45 +422,21 @@ function textOfMessage(m: Anthropic.Message): string {
     .trim();
 }
 
-async function generateToolConfirmReply(result: ToolConfirmResultPayload): Promise<string> {
-  const fallback = buildToolConfirmFallbackReply(result);
-  const persona = await loadPersona();
-  const personaPrompt = buildYuiSystemPrompt(persona);
-  const payload = {
-    toolName: result.toolName,
-    summary: result.summary,
-    success: result.success,
-    reason: result.reason,
-    result: result.result,
-  };
-  const system = [
-    personaPrompt,
-    "",
-    "あなたは上記ペルソナとして、確認付きツールの完了報告を1文だけ作ります。",
-    "通常チャットの履歴・記憶・環境情報は一切使えません。入力 JSON だけが事実です。",
-    "入力 JSON に無い予定名、日付、時刻、場所、相手、結果を絶対に補完しないでください。",
-    "特に別の予定名や今日の予定を混ぜてはいけません。",
-    "success=true なら完了を自然に報告します。success=false なら未実行/中止を自然に報告します。",
-    "口調はペルソナに合わせてください。ただし簡潔に、1文だけ。内部情報、JSON、tool 名、token は出しません。",
-  ].join("\n");
-  const user = [
-    "この JSON だけを材料に、ご主人様への完了報告を1文で作ってください。",
-    "",
-    JSON.stringify(payload, null, 2).slice(0, 5000),
-  ].join("\n");
-  try {
-    const resp = await callLlm("voice", {
-      system,
-      messages: [{ role: "user", content: user }],
-      maxTokens: 160,
-      temperature: 0.3,
-    });
-    const text = sanitizeAssistantText(textOfMessage(resp));
-    return text || fallback;
-  } catch (e) {
-    console.warn("[chat] tool_confirm_result voice generation failed:", e);
-    return fallback;
-  }
+function shouldUseCurrentOnlyForExecutor(
+  gateDecision: ToolGateDecision,
+  currentUserMsg: string
+): boolean {
+  if (gateDecision.decision !== "tool_required") return false;
+  if (gateDecision.category !== "mutate") return false;
+  const hasMutationVerb =
+    /(追加|登録|入れ|作成|作って|保存|更新|変更|消し|削除|送って|送信|リマインダー|TODO|予定)/.test(
+      currentUserMsg
+    );
+  const hasTimeOrDate =
+    /(今日|明日|明後日|来週|今週|[0-9０-９]{1,2}\s*時|午前|午後|朝|昼|夜|[0-9０-９]{1,2}\s*分後|[0-9０-９]{4}[-/年])/u.test(
+      currentUserMsg
+    );
+  return hasMutationVerb && hasTimeOrDate;
 }
 
 async function generateDirectToolReply(args: {
@@ -541,45 +481,6 @@ async function generateDirectToolReply(args: {
   return sanitizeAssistantText(textOfMessage(resp));
 }
 
-async function respondToolConfirmResult(
-  sessionId: string,
-  result: ToolConfirmResultPayload,
-): Promise<Response> {
-  const reply = sanitizeAssistantText(await generateToolConfirmReply(result)) || "かしこまりました。";
-  const emotion = classifyEmotion(reply);
-  pushToSession(sessionId, {
-    type: "yui_message",
-    jobId: -1,
-    text: reply,
-    emotion,
-    specialistId: undefined,
-  });
-
-  const { getEffectiveState } = await import("@/lib/activity");
-  if ((await getEffectiveState(sessionId)) === "private") {
-    const { appendOverlay } = await import("@/lib/conversation-overlay");
-    await appendOverlay(sessionId, {
-      role: "assistant",
-      content: reply,
-      kind: "private",
-      source: "tool_confirm_result",
-      emotion,
-      ts: Date.now(),
-    });
-  } else {
-    await writeAssistantMessage({ sessionId, source: "cron", content: reply, emotion });
-  }
-
-  return Response.json({
-    reply,
-    emotion,
-    sessionId,
-    memoryCounts: { alwaysOn: 0, recentSummaries: 0, relevant: 0 },
-    pendingJobs: [],
-    toolSummary: [],
-  });
-}
-
 export async function POST(req: Request): Promise<Response> {
   return withTrace(`chat:${Date.now().toString(36)}`, () => handlePost(req));
 }
@@ -606,7 +507,6 @@ async function handlePost(req: Request): Promise<Response> {
     sessionId?: unknown;
     source?: unknown;
     timerEvent?: unknown;
-    toolConfirmResult?: unknown;
   };
   try {
     body = await req.json();
@@ -712,20 +612,6 @@ async function handlePost(req: Request): Promise<Response> {
     ];
   }
 
-  // tool_confirm_result (= Phase B、§4.5): confirm 完了 (許可済 or 拒否済) 後の
-  // 内部再 turn。messages: [] で投げてきて、toolConfirmResult payload を元に
-  // 「○○しました」「やめておきます」を Yui に生成させる。tool 呼び出しは禁止。
-  const toolConfirmResult =
-    source === "tool_confirm_result" && isValidToolConfirmResult(body.toolConfirmResult)
-      ? body.toolConfirmResult
-      : null;
-  const isToolConfirmMode = toolConfirmResult !== null;
-  if (isToolConfirmMode && toolConfirmResult) {
-    // confirm 完了報告は通常 chat 経路から隔離する。env/memory を混ぜると別予定を拾って
-    // 「ピクサー展を登録しました」のような誤報告が起きるため、専用の最小 LLM 入力で作る。
-    return respondToolConfirmResult(sessionId, toolConfirmResult);
-  }
-
   if (messages.length === 0) {
     return Response.json(
       { error: "messages or message required" },
@@ -828,8 +714,6 @@ async function handlePost(req: Request): Promise<Response> {
   const exposedSpecialistTools = isTimerMode
     ? specialistTools.filter((t) => specialistAllowedInTimer.has(t.name))
     : specialistTools;
-  // tool_confirm_result mode は最終発話だけ生成。tool 呼び出し禁止 (= 同じ destructive を
-  // 連鎖で踏まないよう構造的に防ぐ。Executor を回さないことで担保)。
   // 直ツール=registryTools (ToolDef[])、specialist umbrella=exposedSpecialistTools を
   // Executor へ別々に渡す (会話 main は tools を持たない)。
   // metadata 駆動 system guard (= untrustedOutput / confirmationPolicy の有無で自動 inject)
@@ -1129,7 +1013,22 @@ async function handlePost(req: Request): Promise<Response> {
     // v3: #2 は #1 と並列なので #1 の ack を使わない (yuiAckText="")。判定は #2 自身の文脈で行う。
     const onExtraTool: ExtraToolHandler = async (tu) => {
       const input = (tu.input ?? {}) as { query?: string };
-      const query = input.query ?? "";
+      let query = input.query ?? "";
+      if (
+        tu.name === "ask_schedule_specialist" &&
+        requestsScheduleDelete(currentUserMsg) &&
+        refersToRecentTarget(currentUserMsg)
+      ) {
+        const recentCreatedEvent = await findLatestConfirmedCalendarCreate(sessionId);
+        if (recentCreatedEvent) {
+          query = buildExplicitDeleteQuery(recentCreatedEvent, query);
+          dbg.push(
+            `- schedule reference resolved: delete event_id=${recentCreatedEvent.id} title=${recentCreatedEvent.summary ?? "(no title)"}`,
+          );
+        } else {
+          dbg.push("- schedule reference unresolved: no recent confirmed calendar create");
+        }
+      }
       const judgeStart = Date.now();
       const decision = await judgeDispatch({
         userMessage: currentUserMsg,
@@ -1191,9 +1090,8 @@ async function handlePost(req: Request): Promise<Response> {
 
     // v5 Tool Gate: 通常 web user turn だけ先に no_tool / tool_required を判定する。
     // tool_required の時は main の自由応答を止め、ツール結果前の事実誤答を構造的に防ぐ。
-    const canRunExec = !isToolConfirmMode && (registryTools.length > 0 || exposedSpecialistTools.length > 0);
-    const isUserTurn =
-      source !== "cron" && source !== "timer" && source !== "tool_confirm_result";
+    const canRunExec = registryTools.length > 0 || exposedSpecialistTools.length > 0;
+    const isUserTurn = source !== "cron" && source !== "timer";
     let gateDecision: ToolGateDecision = {
       decision: "no_tool",
       category: "chat",
@@ -1262,9 +1160,14 @@ async function handlePost(req: Request): Promise<Response> {
       const executorTools = await executorToolsPromise;
       const execEntry = await resolveEntry("executor").catch(() => null);
       const singlePass = /xlam|functionary|gorilla/i.test(execEntry?.entry.modelId ?? "");
-      const execHistory = singlePass
-        ? [{ role: "user" as const, content: currentUserMsg }]
-        : recentHistory;
+      const currentOnly = shouldUseCurrentOnlyForExecutor(gateDecision, currentUserMsg);
+      const execHistory =
+        singlePass || currentOnly
+          ? [{ role: "user" as const, content: currentUserMsg }]
+          : recentHistory;
+      if (currentOnly) {
+        dbg.push("- executor history: self-contained mutation のため最新発話のみ");
+      }
       const runOnce = (tools: typeof registryTools) =>
         runExecutor({
           recentHistory: execHistory,
@@ -1327,7 +1230,7 @@ async function handlePost(req: Request): Promise<Response> {
       // ── C: report/失敗/pending/打ち切り があれば結果を踏まえて報告 (tools 無し) ──
       // L2 安全網: 行動が期待されたのに #2 が 0 実行 → 必ず正直な C で報告 (docs §4.5)。
       // 主信号は Gate の tool_required。Executor が明示 declined して main fallback 済みなら雑談として扱う。
-      // **ユーザー発起ターンのみ** (isUserTurn、上で定義)。cron/timer/tool_confirm_result の
+      // **ユーザー発起ターンのみ** (isUserTurn、上で定義)。cron/timer の
       // system speak (song-change の曲紹介等) は 0 実行が正常なので L2 を効かせない (実機: 曲紹介で謝罪が出た)。
       const actionMissed =
         isUserTurn &&
@@ -1435,11 +1338,9 @@ async function handlePost(req: Request): Promise<Response> {
 
     const emotion = classifyEmotion(reply);
 
-    // source=cron / timer / tool_confirm_result は HTTP の caller が frontend ではない
+    // source=cron / timer は HTTP の caller が frontend ではない
     // (= internalFetch 経由) ので、即時 reply を SSE で session の frontend にも届ける。
-    // tool_confirm_result は Phase B 再 turn で生成した「○○しました」「やめておきます」を
-    // chat に流す経路 (= SSE 無しだと user は最終発話を見ない)。
-    if (source === "cron" || source === "timer" || source === "tool_confirm_result") {
+    if (source === "cron" || source === "timer") {
       pushToSession(sessionId, {
         type: "yui_message",
         jobId: -1,
@@ -1492,11 +1393,11 @@ async function handlePost(req: Request): Promise<Response> {
       if (isPrivate) {
         const { appendOverlay } = await import("@/lib/conversation-overlay");
         const ts = Date.now();
-        // cron / timer / tool_confirm_result source は user 側の trigger (内部発火・確認完了
+        // cron / timer source は user 側の trigger (内部発火
         // ディレクティブ) を残さない (raw_messages 経路と同じ判断、§1179)。これが無いと private
         // モードで <yui_directive> 完了報告プロンプトが user 発言として overlay に残り、
         // リロード時にユーザー発言として表示されてしまう。
-        if (source !== "cron" && source !== "timer" && source !== "tool_confirm_result") {
+        if (source !== "cron" && source !== "timer") {
           await appendOverlay(sessionId, {
             role: "user",
             content: currentUserMsg,
@@ -1517,13 +1418,8 @@ async function handlePost(req: Request): Promise<Response> {
         return;
       }
       // 通常モード: raw_messages へ書き込み (既存挙動)
-      // tool_confirm_result も「server-internal で発火した Yui 単独発話」なので、
-      // synthetic system message を user role で持たず assistant 側だけ保存。
-      // (source は内部識別用なので raw_messages では "cron" 相当に正規化)
       if (source === "cron" || source === "timer") {
         await writeAssistantMessage({ sessionId, source, content: reply, emotion });
-      } else if (source === "tool_confirm_result") {
-        await writeAssistantMessage({ sessionId, source: "cron", content: reply, emotion });
       } else {
         await writeRawTurnPair({
           sessionId,

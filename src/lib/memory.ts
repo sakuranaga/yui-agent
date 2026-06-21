@@ -463,7 +463,7 @@ export async function invalidateChunk(opts: {
  */
 export async function writeRawTurnPair(opts: {
   sessionId: string;
-  source: "web" | "discord_text" | "discord_voice" | "cron" | "timer";
+  source: "web" | "discord_text" | "discord_voice" | "cron" | "timer" | "tool_confirm_result";
   userMsg: string;
   assistantMsg: string;
   emotion?: string;
@@ -509,9 +509,10 @@ export async function writeRawTurnPair(opts: {
  */
 export async function writeAssistantMessage(opts: {
   sessionId: string;
-  source: "web" | "discord_text" | "discord_voice" | "cron" | "timer";
+  source: "web" | "discord_text" | "discord_voice" | "cron" | "timer" | "tool_confirm_result";
   content: string;
   emotion?: string;
+  toolSummary?: Array<{ name: string; brief: string }>;
 }): Promise<void> {
   await db.insert(rawMessages).values({
     sessionId: opts.sessionId,
@@ -519,6 +520,7 @@ export async function writeAssistantMessage(opts: {
     content: opts.content,
     emotion: opts.emotion,
     source: opts.source,
+    toolSummary: opts.toolSummary ?? [],
   });
 }
 
@@ -624,4 +626,3 @@ export function formatMemoryPrompt(opts: {
     "これらは会話の参考までに。明示的に話題に出すかは文脈次第 (全部披露しない)。",
   ].join("\n\n");
 }
-

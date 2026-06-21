@@ -71,6 +71,7 @@ export type ExecutorStopReason =
   | "no_progress"
   | "budget"
   | "pending_confirmation"
+  | "async_dispatched" // specialist 等の非同期 job を投入したので、結果待ちに委ねて再ループしない
   | "single_pass" // single-pass executor (xLAM 等): 1 回目のツールを実行したら再ループしない
   | "llm_error"; // 再呼び出し (mini-loop 2 回目以降) で LLM がエラー → 既存結果で graceful 終了 (backstop)
 
@@ -122,6 +123,10 @@ export function aggregateForReport(
       // 重複ガードでスキップした時は「既にあるので追加しなかった」を1回だけ報告 (A7)。
       else if (skipReason === "dedup_recent_execution")
         lines.push(`- [重複スキップ] ${toolName}: 直近に同じ内容を実行済みのため、新規には登録していません。`);
+      else {
+        const body = resultToText(outcome.result);
+        lines.push(`- [未実行] ${toolName}: ${body || "ツール実行はスキップされました。完了とは言わない。"}`);
+      }
       continue;
     }
     if (executionState === "executed" && disposition === "silent") continue;
@@ -139,6 +144,9 @@ export function aggregateForReport(
   // (single-pass executor は single_pass で終わり llm_error にはならないので注記対象外)。
   if (stopReason === "llm_error") {
     lines.push(`- [注意] ツール選択モデルが途中で応答できず、続きのツールを実行できませんでした。全部は完了していない可能性があります。`);
+  }
+  if (stopReason === "no_progress" && lines.length === 0) {
+    lines.push(`- [未実行] ツール候補は選ばれましたが、実行されませんでした。完了とは言わず、確認できなかった旨を短く伝える。`);
   }
   // L2 安全網: 行動が期待されたのに 0 実行 → 沈黙させず正直に報告 (docs §4.5)。
   if (actionMissed && outcomes.length === 0) {
@@ -237,6 +245,7 @@ export async function runExecutor(opts: {
   const outcomes: ExecutorOutcome[] = [];
   const seenUnknown = new Set<string>(); // 同一 unknown 反復を no-progress 判定に使う
   let iterations = 0;
+  let asyncDispatched = false;
 
   while (iterations < maxIter) {
     iterations++;
@@ -318,6 +327,7 @@ export async function runExecutor(opts: {
           outcomes.push({ toolName: tu.name, input: tu.input, outcome });
           toolResults.push(outcome.result);
           if (outcome.executionState !== "skipped") anyProgress = true;
+          if (outcome.executionState === "executed") asyncDispatched = true;
           if (outcome.executionState === "pending_confirmation") anyPending = true;
           if (outcome.skipReason === "budget") budgetHit = true;
           continue;
@@ -355,6 +365,7 @@ export async function runExecutor(opts: {
     if (anyPending) return { outcomes, iterations, stopReason: "pending_confirmation" };
     if (budgetHit) return { outcomes, iterations, stopReason: "budget" };
     if (!anyProgress) return { outcomes, iterations, stopReason: "no_progress" };
+    if (asyncDispatched) return { outcomes, iterations, stopReason: "async_dispatched" };
     // single-pass executor (xLAM 等の function-calling 専用モデル) は 1 回で parallel に
     // 全ツールを出すので、tool_result を含む 2 回目を呼ばずここで終了する。これにより
     // multi-turn 非対応モデルの 500 (graceful catch の backstop) と無駄な再呼び出しを回避。

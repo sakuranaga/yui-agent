@@ -52,7 +52,7 @@ export const rawMessages = pgTable(
     source: text("source")
       .notNull()
       .default("web")
-      .$type<"web" | "discord_text" | "discord_voice" | "cron" | "timer">(),
+      .$type<"web" | "discord_text" | "discord_voice" | "cron" | "timer" | "tool_confirm_result">(),
     /**
      * 画像等の添付ファイルメタ。実体は data/chat-images/<sessionId>/<filename>。
      * 古い添付はクリーンナップでファイルだけ削除され、ここの配列は空になる。

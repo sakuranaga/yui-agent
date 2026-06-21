@@ -14,6 +14,9 @@
  */
 import { pushToSession } from "@/lib/jobs/events";
 import { randomBytes } from "node:crypto";
+import { sql } from "drizzle-orm";
+import { db } from "@/db/client";
+import { tasks } from "@/db/schema";
 import { cacheGet, cacheSet, cacheDel } from "@/lib/cache";
 import type {
   ConfirmationPolicy,
@@ -24,6 +27,7 @@ import type {
 } from "./types";
 import { ALL_TOOLS } from "./registry";
 import { finalizeReservationByToken } from "./dedup-guard";
+import { emitConfirmResult } from "./confirm-result-controller";
 
 const CONFIRM_TTL_SEC = 600; // 10 分
 
@@ -68,6 +72,54 @@ async function removeFromSessionIndex(sessionId: string, token: string): Promise
   const next = cur.filter((t) => t !== token);
   if (next.length === 0) await cacheDel(SESSION_INDEX_KEY(sessionId));
   else await cacheSet(SESSION_INDEX_KEY(sessionId), next, CONFIRM_TTL_SEC);
+}
+
+async function markTaskConfirmFinal(args: {
+  token: string;
+  toolName: string;
+  finalState: "completed" | "failed" | "cancelled";
+  success: boolean;
+  result?: unknown;
+  reason?: string | null;
+}): Promise<void> {
+  const resultJson = JSON.stringify(args.result ?? null);
+  const reason = args.reason ?? null;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const updated = await db.execute(sql`
+        UPDATE ${tasks}
+        SET output = jsonb_set(
+          jsonb_set(
+            COALESCE(output, '{}'::jsonb),
+            '{state}',
+            to_jsonb(${args.finalState}::text),
+            true
+          ),
+          '{confirmFinal}',
+          jsonb_build_object(
+            'token', ${args.token}::text,
+            'toolName', ${args.toolName}::text,
+            'success', ${args.success},
+            'state', ${args.finalState}::text,
+            'reason', ${reason}::text,
+            'result', ${resultJson}::jsonb
+          ),
+          true
+        )
+        WHERE output @> jsonb_build_object(
+          'outcomes',
+          jsonb_build_array(jsonb_build_object('confirmToken', ${args.token}::text))
+        )
+        RETURNING id
+      `);
+      if (updated.length > 0) return;
+      await sleep(250);
+    }
+    console.warn(`[tool-confirm/${args.token}] task final state update matched no rows`);
+  } catch (e) {
+    console.warn(`[tool-confirm/${args.token}] task final state update failed:`, e);
+  }
 }
 
 /**
@@ -128,14 +180,22 @@ export async function applyConfirmDecision(
   if (decision === "denied") {
     // dedup reservation を解放 (cancelled → 再依頼を妨げない)。
     await finalizeReservationByToken(token, "cancelled");
+    await markTaskConfirmFinal({
+      token,
+      toolName: p.toolName,
+      finalState: "cancelled",
+      success: false,
+      reason: "user denied",
+    });
     await removeFromSessionIndex(p.sessionId, token);
     pushToSession(p.sessionId, {
       type: "tool_confirm_result",
       token,
+      toolName: p.toolName,
       success: false,
       reason: "user denied",
     });
-    void dispatchPostConfirmYuiTurn({
+    void emitConfirmResult({
       sessionId: p.sessionId,
       token,
       toolName: p.toolName,
@@ -143,7 +203,7 @@ export async function applyConfirmDecision(
       success: false,
       reason: "user denied",
     }).catch((e) => {
-      console.warn(`[tool-confirm/${token}] post-deny dispatch failed:`, e);
+      console.warn(`[tool-confirm/${token}] post-deny voice failed:`, e);
     });
   }
   return { status: decision, pending: p };
@@ -165,16 +225,24 @@ async function markFailed(token: string, reason: string): Promise<void> {
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
   // dedup reservation を解放 (failed → 再試行を妨げない)。
   await finalizeReservationByToken(token, "failed");
+  await markTaskConfirmFinal({
+    token,
+    toolName: p.toolName,
+    finalState: "failed",
+    success: false,
+    reason,
+  });
   await removeFromSessionIndex(p.sessionId, token);
   pushToSession(p.sessionId, {
     type: "tool_confirm_result",
     token,
+    toolName: p.toolName,
     success: false,
     reason,
   });
   // Phase B 再 turn: 失敗理由を Yui が会話に反映させる
   // (= 「再検証失敗で実行できませんでした、〜の理由です」を口頭報告)
-  void dispatchPostConfirmYuiTurn({
+  void emitConfirmResult({
     sessionId: p.sessionId,
     token,
     toolName: p.toolName,
@@ -182,7 +250,7 @@ async function markFailed(token: string, reason: string): Promise<void> {
     success: false,
     reason,
   }).catch((e) => {
-    console.warn(`[tool-confirm/${token}] post-fail dispatch failed:`, e);
+    console.warn(`[tool-confirm/${token}] post-fail voice failed:`, e);
   });
 }
 
@@ -194,15 +262,23 @@ async function markExecuted(token: string, result: unknown): Promise<void> {
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
   // dedup reservation を確定 (executed)。
   await finalizeReservationByToken(token, "executed");
+  await markTaskConfirmFinal({
+    token,
+    toolName: p.toolName,
+    finalState: "completed",
+    success: true,
+    result,
+  });
   await removeFromSessionIndex(p.sessionId, token);
   pushToSession(p.sessionId, {
     type: "tool_confirm_result",
     token,
+    toolName: p.toolName,
     success: true,
     result,
   });
   // Phase B 再 turn: Yui に結果を踏まえた最終発話を生成させる (= specialist 完了報告と同経路)
-  void dispatchPostConfirmYuiTurn({
+  void emitConfirmResult({
     sessionId: p.sessionId,
     token,
     toolName: p.toolName,
@@ -210,42 +286,7 @@ async function markExecuted(token: string, result: unknown): Promise<void> {
     success: true,
     result,
   }).catch((e) => {
-    console.warn(`[tool-confirm/${token}] post-execute dispatch failed:`, e);
-  });
-}
-
-/**
- * confirm 完了 (= confirmed → executed もしくは denied) 後、Yui に内部 chat の
- * 再 turn を回して「○○しました」「やめておきます」等の最終発話を生成させる。
- * SSE で frontend に届くので user 視点では chat の続きとして見える。
- */
-async function dispatchPostConfirmYuiTurn(opts: {
-  sessionId: string;
-  token: string;
-  toolName: string;
-  summary: string;
-  success: boolean;
-  result?: unknown;
-  reason?: string;
-}): Promise<void> {
-  const { internalFetch } = await import("@/lib/internal-fetch");
-  const port = process.env.PORT ?? "3000";
-  await internalFetch(`http://localhost:${port}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages: [],
-      sessionId: opts.sessionId,
-      source: "tool_confirm_result",
-      toolConfirmResult: {
-        token: opts.token,
-        toolName: opts.toolName,
-        summary: opts.summary,
-        success: opts.success,
-        result: opts.result ?? null,
-        reason: opts.reason ?? null,
-      },
-    }),
+    console.warn(`[tool-confirm/${token}] post-execute voice failed:`, e);
   });
 }
 

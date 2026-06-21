@@ -42,6 +42,37 @@ const VOICE_MAX_TOKENS = 800;
 
 type ConversationTurn = { role: "user" | "assistant"; content: string };
 
+function requestsMutation(text: string): boolean {
+  return /削除|消し|キャンセル|取消|取り消|作成|追加|登録|入れ|変更|更新|修正/.test(text);
+}
+
+function requestsDeletion(text: string): boolean {
+  return /削除|消し|キャンセル|取消|取り消/.test(text);
+}
+
+function hasMutationOutcome(outcomes: Array<{ toolName?: string; state?: string }>): boolean {
+  return outcomes.some(
+    (o) =>
+      (o.toolName === "gcal_create_event" ||
+        o.toolName === "gcal_update_event" ||
+        o.toolName === "gcal_delete_event") &&
+      (o.state === "executed" || o.state === "pending_confirmation" || o.state === "skipped")
+  );
+}
+
+function buildMutationMissText(originalUserMessage: string): string {
+  if (requestsDeletion(originalUserMessage)) {
+    return [
+      "申し訳ございません。該当候補の確認までで止まっており、予定の削除は実行していません。",
+      "削除対象を確認してから進める必要があります。",
+    ].join("\n\n");
+  }
+  return [
+    "申し訳ございません。対象の確認までで止まっており、予定の変更は実行していません。",
+    "もう一度、対象を指定してお申し付けください。",
+  ].join("\n\n");
+}
+
 /**
  * specialist tool_use を background job として起動。
  * 即座に jobId を返す。実 specialist の処理は裏で進む。
@@ -155,8 +186,12 @@ async function runJobInner(args: {
     //       次のターンと混じって見える事故を防ぐ)。
     const isTechError = /Spotify と未連携|Premium が必要|デバイスが見つかりません|未設定/.test(specResult.text);
     const isPendingConfirmation = specResult.state === "pending_confirmation";
+    const mutationMiss =
+      specialistId === "schedule" &&
+      requestsMutation(originalUserMessage) &&
+      !hasMutationOutcome(specResult.outcomes);
     let report: { title: string; markdown: string } | null = null;
-    if (!isTechError && !isPendingConfirmation) {
+    if (!isTechError && !isPendingConfirmation && !mutationMiss) {
       try {
         report = await generateReport({
           originalUserMessage,
@@ -171,7 +206,14 @@ async function runJobInner(args: {
 
     let yuiText = specResult.text;
     let emotion: string = "neutral";
-    if (!isPendingConfirmation) {
+    const outputState = mutationMiss ? "partial" : specResult.state;
+    if (mutationMiss) {
+      yuiText = buildMutationMissText(originalUserMessage);
+      emotion = "sad";
+      console.warn(
+        `[job ${jobId}] mutation requested but no mutate outcome; suppressing generated voice`
+      );
+    } else if (!isPendingConfirmation) {
       try {
         const voiceResult = await formatInYuiVoice({
           originalUserMessage,
@@ -196,7 +238,7 @@ async function runJobInner(args: {
         status: "succeeded",
         completedAt: new Date(),
         output: {
-          state: specResult.state,
+          state: outputState,
           specialistText: specResult.text,
           yuiText,
           emotion,
@@ -215,6 +257,13 @@ async function runJobInner(args: {
     });
 
     // 6. SSE push (会話メッセージ + ノートパネル更新)
+    pushToSession(sessionId, {
+      type: "job_status",
+      jobId,
+      status: "succeeded",
+      specialistId,
+    });
+
     if (!isPendingConfirmation) {
       pushToSession(sessionId, {
         type: "yui_message",

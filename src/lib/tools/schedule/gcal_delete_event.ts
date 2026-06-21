@@ -21,6 +21,22 @@ export const gcalDeleteEvent: ToolDef = {
   confirmationPolicy: "confirm_destructive",
   availabilityKey: "google:calendar.events",
   isAvailable: isCalendarEvents,
+  dedup: {
+    windowMinutes: 1440,
+    scope: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      const cal = typeof i.calendar_id === "string" ? i.calendar_id : "primary";
+      return `calendar:${cal}`;
+    },
+    anchor: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      return typeof i.event_id === "string" ? i.event_id : null;
+    },
+    title: (input) => {
+      const i = (input ?? {}) as Record<string, unknown>;
+      return typeof i.event_id === "string" ? i.event_id : "delete_event";
+    },
+  },
   handler: async (input) => {
     const i = (input ?? {}) as Record<string, unknown>;
     await deleteEvent({

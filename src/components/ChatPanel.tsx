@@ -485,6 +485,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
       try {
         const data = JSON.parse((e as MessageEvent).data) as {
           token: string;
+          toolName?: string;
           success: boolean;
           result?: unknown;
           reason?: string;
@@ -518,8 +519,9 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
           jobId: number;
           status: "running" | "succeeded" | "failed";
         };
-        // failed のときだけ pending から除外 (succeeded は yui_message で除外される)
-        if (data.status === "failed") {
+        // pending_confirmation で終わる specialist は yui_message を出さないため、
+        // job_status=succeeded でも pending 表示を閉じる。
+        if (data.status === "succeeded" || data.status === "failed") {
           setPendingJobs((m) => {
             if (!m.has(data.jobId)) return m;
             const next = new Map(m);
