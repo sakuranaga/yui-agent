@@ -67,7 +67,7 @@
 
 ### Phase R1: 応答計画と発話生成の分離
 
-ステータス: 完了  
+ステータス: 完了
 コミット: `e5ebf4b 応答計画と発話生成を分離`
 
 内容:
@@ -82,7 +82,7 @@
 
 ### Phase R2: 文脈構築の分離
 
-ステータス: 完了  
+ステータス: 完了
 コミット: `701f2ba チャット文脈構築を分離`
 
 内容:
@@ -117,7 +117,8 @@
 
 ### Phase R4: System Prompt Builder の分離
 
-ステータス: 未着手
+ステータス: 完了
+コミット: `TBD システムプロンプト構築を分離`
 
 目的:
 `route.ts` に残る persona / guard / user profile / health goals / timer guard の system block 構築を `src/lib/chat/system-prompt-builder.ts` に移す。
@@ -388,4 +389,3 @@ docker compose logs --since 1m web
 - 予定作成・削除・再作成が安定して動く
 - typecheck / lint が通る
 - 主要手動シナリオ R9 が通る
-
