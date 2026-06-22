@@ -22,15 +22,9 @@ import {
 import { runToolOrchestrator } from "@/lib/chat/tool-orchestrator";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 import { tickMaintenance } from "@/lib/startup";
-import { db } from "@/db/client";
-import { tasks } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
 import { yuiSpecialistTools } from "@/lib/specialists/registry";
 import { toolsForContext } from "@/lib/tools/runtime";
 import { createDispatchLedger } from "@/lib/tools/dispatch";
-import {
-  type ExtraToolHandler,
-} from "@/lib/tools/executor";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
@@ -39,8 +33,6 @@ import {
   listSources as listNewsSources,
   pinArticle as pinNewsArticle,
 } from "@/lib/news";
-import { dispatchSpecialistJob } from "@/lib/jobs/dispatcher";
-import { judgeDispatch } from "@/lib/judge/dispatch-judge";
 import { clientError } from "@/lib/api-error";
 import { fetchUrl, searchWeb } from "@/lib/tools/web";
 import { pushToSession, pushDebugReport } from "@/lib/jobs/events";
@@ -170,84 +162,6 @@ function isValidTimerEvent(v: unknown): v is TimerEventPayload {
     typeof o.targetAt === "string" &&
     typeof o.savedText === "string"
   );
-}
-
-type ConfirmedCalendarEventRef = {
-  id: string;
-  calendarId?: string;
-  summary?: string;
-  startJst?: string;
-  endJst?: string;
-  start?: unknown;
-  end?: unknown;
-};
-
-function asPlainRecord(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-}
-
-function stringValue(v: unknown): string | undefined {
-  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
-}
-
-function requestsScheduleDelete(text: string): boolean {
-  return /(予定|スケジュール|カレンダー|アポ|予約).*(削除|消し|キャンセル|取消|取り消)|(?:削除|消し|キャンセル|取消|取り消).*(予定|スケジュール|カレンダー|アポ|予約)/u.test(text);
-}
-
-function refersToRecentTarget(text: string): boolean {
-  return /(その|この|さっき|先ほど|直前|今(?:登録|追加|作成|入れ)た?|いま(?:登録|追加|作成|入れ)た?)/u.test(text);
-}
-
-function extractConfirmedCalendarEvent(output: unknown): ConfirmedCalendarEventRef | null {
-  const root = asPlainRecord(output);
-  const confirmFinal = asPlainRecord(root?.confirmFinal);
-  if (!confirmFinal || confirmFinal.toolName !== "gcal_create_event" || confirmFinal.success !== true) {
-    return null;
-  }
-  const result = asPlainRecord(confirmFinal.result);
-  const event = asPlainRecord(result?.event);
-  const id = stringValue(event?.id);
-  if (!event || !id) return null;
-  return {
-    id,
-    calendarId: stringValue(event.calendar_id) ?? stringValue(event.calendarId),
-    summary: stringValue(event.summary),
-    startJst: stringValue(event.start_jst),
-    endJst: stringValue(event.end_jst),
-    start: event.start,
-    end: event.end,
-  };
-}
-
-async function findLatestConfirmedCalendarCreate(
-  sessionId: string
-): Promise<ConfirmedCalendarEventRef | null> {
-  const rows = await db
-    .select({ output: tasks.output })
-    .from(tasks)
-    .where(eq(tasks.sessionId, sessionId))
-    .orderBy(desc(tasks.createdAt), desc(tasks.id))
-    .limit(20);
-  for (const row of rows) {
-    const event = extractConfirmedCalendarEvent(row.output);
-    if (event) return event;
-  }
-  return null;
-}
-
-function buildExplicitDeleteQuery(event: ConfirmedCalendarEventRef, originalQuery: string): string {
-  const parts = [
-    "直近に登録完了した次の1件だけを削除して。",
-    `event_id=${event.id}`,
-    `calendar_id=${event.calendarId ?? "primary"}`,
-  ];
-  if (event.summary) parts.push(`summary="${event.summary}"`);
-  if (event.startJst) parts.push(`start_jst="${event.startJst}"`);
-  if (event.endJst) parts.push(`end_jst="${event.endJst}"`);
-  parts.push("gcal_delete_event input には event_id に加えて、分かっている summary/start_jst/end_jst も必ず含める。");
-  parts.push("他の候補を検索してまとめて削除しない。該当 event_id の1件だけを対象にする。");
-  if (originalQuery) parts.push(`元の依頼: ${originalQuery}`);
-  return parts.join(" ");
 }
 
 const MAX_IMAGES_PER_TURN = 10;
@@ -598,7 +512,6 @@ async function handlePost(req: Request): Promise<Response> {
       dynamicContext,
       historyTimestamps,
     });
-    const pendingJobs: Array<{ jobId: number; specialist: string }> = [];
     // このターン中に実行した tool 呼び出しの要約 (raw_messages.tool_summary 用)。
     const executedTools: Array<{ name: string; brief: string }> = [];
     // ループ全体の text を蓄積 (C が空でも B の ack を拾う fallback)。
@@ -655,98 +568,19 @@ async function handlePost(req: Request): Promise<Response> {
       console.log(`[executor-input] recentHistory=${recentHistory.length}件(user-only) last="${String(recentHistory[recentHistory.length - 1]?.content).slice(0, 30)}"`);
     }
 
-    // ── specialist 橋渡し: #2 が ask_*_specialist を選んだら既存 judge + dispatchSpecialistJob へ ──
-    // (specialist パイプライン = 独自モデル sub-agent + SSE/voice/pendingJobs は温存。書き換えない)
-    // v3: #2 は #1 と並列なので #1 の ack を使わない (yuiAckText="")。判定は #2 自身の文脈で行う。
-    const onExtraTool: ExtraToolHandler = async (tu) => {
-      const input = (tu.input ?? {}) as { query?: string };
-      let query = input.query ?? "";
-      if (
-        tu.name === "ask_schedule_specialist" &&
-        requestsScheduleDelete(currentUserMsg) &&
-        refersToRecentTarget(currentUserMsg)
-      ) {
-        const recentCreatedEvent = await findLatestConfirmedCalendarCreate(sessionId);
-        if (recentCreatedEvent) {
-          query = buildExplicitDeleteQuery(recentCreatedEvent, query);
-          input.query = query;
-          dbg.push(
-            `- schedule reference resolved: delete event_id=${recentCreatedEvent.id} title=${recentCreatedEvent.summary ?? "(no title)"}`,
-          );
-        } else {
-          dbg.push("- schedule reference unresolved: no recent confirmed calendar create");
-        }
-      }
-      const judgeStart = Date.now();
-      const decision = await judgeDispatch({
-        userMessage: currentUserMsg,
-        yuiAckText: "",
-        toolName: tu.name,
-        toolQuery: query,
-        envBlock,
-      });
-      if (process.env.NODE_ENV !== "production") {
-        console.log(`[judge] ${tu.name} → ${decision.action} (${decision.reason}) [${Date.now() - judgeStart}ms]`);
-      }
-      if (decision.action === "skip") {
-        return {
-          executionState: "skipped",
-          disposition: "report",
-          result: {
-            type: "tool_result",
-            tool_use_id: tu.id,
-            content: JSON.stringify({ skipped: true, reason: decision.reason }),
-          },
-        };
-      }
-      const result = await dispatchSpecialistJob({
-        sessionId,
-        yuiToolName: tu.name,
-        query,
-        originalUserMessage: currentUserMsg,
-        conversationHistory: messages.map((m) => ({ role: m.role, content: m.content })),
-        yuiAckText: "",
-      });
-      if (result.ok) {
-        pendingJobs.push({ jobId: result.jobId, specialist: tu.name });
-        if (process.env.NODE_ENV !== "production") {
-          console.log(`[chat] dispatched job=${result.jobId} ${tu.name} query="${query.slice(0, 40)}"`);
-        }
-        // 成功 = silent (結果は SSE/voice で非同期配信 → C を二重に起動しない、§5.4.2)
-        return {
-          executionState: "executed",
-          disposition: "silent",
-          result: {
-            type: "tool_result",
-            tool_use_id: tu.id,
-            content: JSON.stringify({ dispatched: true, job_id: result.jobId }),
-          },
-        };
-      }
-      console.warn(`[chat] failed to dispatch ${tu.name}: ${result.error}`);
-      return {
-        executionState: "failed",
-        disposition: "report",
-        result: {
-          type: "tool_result",
-          tool_use_id: tu.id,
-          content: JSON.stringify({ error: `Specialist dispatch failed: ${result.error}` }),
-          is_error: true,
-        },
-      };
-    };
-
     const isUserTurn = source !== "cron" && source !== "timer";
     const toolOrchestrator = await runToolOrchestrator({
+      sessionId,
       currentUserMsg,
+      messages,
       recentHistory,
       runtimeFacts,
+      envBlock,
       registryTools,
       exposedSpecialistTools,
       isUserTurn,
       mainCtx,
       dispatchLedger,
-      onExtraTool,
       completeExecutor: async ({ system, messages: m, tools: t }) => {
         const r = await callLlm("executor", { system, messages: m, tools: t });
         accUsage(r);
@@ -754,6 +588,7 @@ async function handlePost(req: Request): Promise<Response> {
       },
     });
     dbg.push(...toolOrchestrator.debugLines);
+    const pendingJobs = toolOrchestrator.pendingJobs;
     const { gateDecision, runExec } = toolOrchestrator;
     const exec = toolOrchestrator.exec;
     let ackText = "";

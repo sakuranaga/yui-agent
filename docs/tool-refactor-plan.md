@@ -198,7 +198,7 @@ async function buildMemoryContext(args: {
 
 ### Phase R6: Tool Orchestrator の分離
 
-ステータス: 未着手
+ステータス: 完了
 
 目的:
 Tool Gate / tool retrieval / Executor / specialist bridge の外枠を `src/lib/chat/tool-orchestrator.ts` に移す。
@@ -252,6 +252,9 @@ type ToolOrchestratorResult = {
 - tool retrieval で候補が狭まった時も fallback が効く
 
 #### Phase R6b: Specialist Bridge の分離
+
+ステータス: 完了
+コミット: `TBD Specialist Bridge をオーケストレーターへ統合`
 
 内容:
 - `ask_schedule_specialist` の recent target delete 解決
