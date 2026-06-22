@@ -207,6 +207,9 @@ Tool Gate / tool retrieval / Executor / specialist bridge の外枠を `src/lib/
 
 #### Phase R6a: Gate + Retrieval + Executor Runner の分離
 
+ステータス: 完了
+コミット: `TBD ツール実行オーケストレーターを分離`
+
 内容:
 - Tool Gate 判定
 - tool candidate retrieval

@@ -19,6 +19,7 @@ import {
   runPostPersistJobs,
   saveUserImages,
 } from "@/lib/chat/persistence";
+import { runToolOrchestrator } from "@/lib/chat/tool-orchestrator";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 import { tickMaintenance } from "@/lib/startup";
 import { db } from "@/db/client";
@@ -28,11 +29,8 @@ import { yuiSpecialistTools } from "@/lib/specialists/registry";
 import { toolsForContext } from "@/lib/tools/runtime";
 import { createDispatchLedger } from "@/lib/tools/dispatch";
 import {
-  runExecutor,
   type ExtraToolHandler,
 } from "@/lib/tools/executor";
-import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
-import { decideToolGate, type ToolGateDecision } from "@/lib/tools/gate";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
@@ -340,7 +338,7 @@ function briefToolInput(toolName: string, input: Record<string, unknown>): strin
   }
 }
 
-import { callLlm, withTrace, resolveEntry } from "@/lib/llm";
+import { callLlm, withTrace } from "@/lib/llm";
 import { getAnthropicConfig } from "@/lib/ai-settings";
 
 
@@ -355,23 +353,6 @@ function isValidSource(s: unknown): s is Source {
     typeof s === "string" &&
     ["web", "discord_text", "discord_voice", "cron", "timer"].includes(s)
   );
-}
-
-function shouldUseCurrentOnlyForExecutor(
-  gateDecision: ToolGateDecision,
-  currentUserMsg: string
-): boolean {
-  if (gateDecision.decision !== "tool_required") return false;
-  if (gateDecision.category !== "mutate") return false;
-  const hasMutationVerb =
-    /(追加|登録|入れ|作成|作って|保存|更新|変更|消し|削除|送って|送信|リマインダー|TODO|予定)/.test(
-      currentUserMsg
-    );
-  const hasTimeOrDate =
-    /(今日|明日|明後日|来週|今週|[0-9０-９]{1,2}\s*時|午前|午後|朝|昼|夜|[0-9０-９]{1,2}\s*分後|[0-9０-９]{4}[-/年])/u.test(
-      currentUserMsg
-    );
-  return hasMutationVerb && hasTimeOrDate;
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -755,61 +736,26 @@ async function handlePost(req: Request): Promise<Response> {
       };
     };
 
-    // v5 Tool Gate: 通常 web user turn だけ先に no_tool / tool_required を判定する。
-    // tool_required の時は main の自由応答を止め、ツール結果前の事実誤答を構造的に防ぐ。
-    const canRunExec = registryTools.length > 0 || exposedSpecialistTools.length > 0;
     const isUserTurn = source !== "cron" && source !== "timer";
-    let gateDecision: ToolGateDecision = {
-      decision: "no_tool",
-      category: "chat",
-      waitPolicy: "wait",
-      confidence: 1,
-      reason: "gate skipped for non-user/internal turn",
-    };
-    if (canRunExec && isUserTurn) {
-      gateDecision = await decideToolGate({
-        currentUserMsg,
-        recentHistory,
-        runtimeFacts,
-      });
-    }
-    const runExec = canRunExec && gateDecision.decision === "tool_required";
-    dbg.push(
-      `- gate: ${gateDecision.decision} category=${gateDecision.category} wait=${gateDecision.waitPolicy} confidence=${gateDecision.confidence.toFixed(2)}${gateDecision.fallback ? ` fallback=${gateDecision.fallback}` : ""}`,
-    );
-    if (process.env.NODE_ENV !== "production") {
-      console.log(
-        `[tool-gate] ${gateDecision.decision} category=${gateDecision.category} wait=${gateDecision.waitPolicy} confidence=${gateDecision.confidence.toFixed(2)} reason="${gateDecision.reason.slice(0, 80)}"`,
-      );
-    }
-
-    // Tool retrieval: Executor を走らせる時だけ候補を絞る。specialist umbrella は常時同梱。
-    const executorToolsPromise: Promise<typeof registryTools> = (async () => {
-      if (!runExec || registryTools.length === 0) return registryTools;
-      let executorTools = registryTools;
-      try {
-        const retrieval = await retrieveToolCandidates({
-          query: currentUserMsg,
-          permitted: registryTools,
-        });
-        if (retrieval.mode !== "full-catalog") {
-          const candidateSet = new Set(retrieval.toolNames);
-          const filtered = registryTools.filter((t) => candidateSet.has(t.name));
-          if (filtered.length > 0) executorTools = filtered;
-        }
-        dbg.push(`- retrieval: ${retrieval.mode} ${registryTools.length}→${executorTools.length}`);
-        if (process.env.NODE_ENV !== "production") {
-          console.log(
-            `[tool-retrieval] mode=${retrieval.mode} ${registryTools.length}→${executorTools.length} q="${currentUserMsg.slice(0, 30)}"`,
-          );
-        }
-      } catch (e) {
-        console.warn("[tool-retrieval] 失敗 → 全ツールで継続:", e);
-      }
-      return executorTools;
-    })();
-
-    let exec: Awaited<ReturnType<typeof runExecutor>> | null = null;
+    const toolOrchestrator = await runToolOrchestrator({
+      currentUserMsg,
+      recentHistory,
+      runtimeFacts,
+      registryTools,
+      exposedSpecialistTools,
+      isUserTurn,
+      mainCtx,
+      dispatchLedger,
+      onExtraTool,
+      completeExecutor: async ({ system, messages: m, tools: t }) => {
+        const r = await callLlm("executor", { system, messages: m, tools: t });
+        accUsage(r);
+        return r;
+      },
+    });
+    dbg.push(...toolOrchestrator.debugLines);
+    const { gateDecision, runExec } = toolOrchestrator;
+    const exec = toolOrchestrator.exec;
     let ackText = "";
     let finalIterText = "";
     let didMainFallback = false;
@@ -824,47 +770,7 @@ async function handlePost(req: Request): Promise<Response> {
         accumulatedTexts.push(ackText);
         finalIterText = ackText;
       }
-    } else {
-      const executorTools = await executorToolsPromise;
-      const execEntry = await resolveEntry("executor").catch(() => null);
-      const singlePass = /xlam|functionary|gorilla/i.test(execEntry?.entry.modelId ?? "");
-      const currentOnly = shouldUseCurrentOnlyForExecutor(gateDecision, currentUserMsg);
-      const execHistory =
-        singlePass || currentOnly
-          ? [{ role: "user" as const, content: currentUserMsg }]
-          : recentHistory;
-      if (currentOnly) {
-        dbg.push("- executor history: self-contained mutation のため最新発話のみ");
-      }
-      const runOnce = (tools: typeof registryTools) =>
-        runExecutor({
-          recentHistory: execHistory,
-          runtimeFacts,
-          tools,
-          singlePass,
-          ctx: mainCtx,
-          ledger: dispatchLedger,
-          complete: async ({ system, messages: m, tools: t }) => {
-            const r = await callLlm("executor", { system, messages: m, tools: t });
-            accUsage(r);
-            return r;
-          },
-          extraTools: exposedSpecialistTools,
-          onExtraTool,
-        });
-      exec = await runOnce(executorTools);
-      const narrowed = executorTools.length < registryTools.length;
-      if (
-        narrowed &&
-        exec.outcomes.length === 0 &&
-        exec.stopReason !== "declined" &&
-        isActionIntent(currentUserMsg)
-      ) {
-        if (process.env.NODE_ENV !== "production") {
-          console.log("[tool-retrieval] no_tool_calls + action-intent → full catalog 再試行");
-        }
-        exec = await runOnce(registryTools);
-      }
+    } else if (exec) {
       // Gate false positive: Executor が明示 no_tool なら通常会話へ戻す。
       if (exec.outcomes.length === 0 && exec.stopReason === "declined") {
         dbg.push("- gate fallback: executor declined → main 通常応答へ復帰");
