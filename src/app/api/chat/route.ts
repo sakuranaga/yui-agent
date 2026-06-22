@@ -13,19 +13,12 @@ import {
   type ClientMessage,
 } from "@/lib/chat/context-builder";
 import { buildChatSystemPrompt } from "@/lib/chat/system-prompt-builder";
+import { buildMemoryContext } from "@/lib/chat/memory-context";
 import {
   persistChatTurn,
   runPostPersistJobs,
   saveUserImages,
 } from "@/lib/chat/persistence";
-import {
-  buildQueryText,
-  formatMemoryPrompt,
-  loadAlwaysOnFacts,
-  loadRecentSummaries,
-  retrieveRelevant,
-  type RetrievedChunk,
-} from "@/lib/memory";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 import { tickMaintenance } from "@/lib/startup";
 import { db } from "@/db/client";
@@ -108,7 +101,6 @@ import {
 // 主ターンモデルは lib/llm.ts の "main" role で解決 (env: ANTHROPIC_MODEL, default sonnet)。
 // 出力上限はモデル別の entry.maxTokens (#206 §8.10) に委譲 (= main 呼びで maxTokens を渡さない)。
 const HISTORY_TURNS = parseInt(process.env.CHAT_HISTORY_TURNS ?? "8", 10);
-const RETRIEVAL_TOP_K = parseInt(process.env.RETRIEVAL_TOP_K ?? "5", 10);
 
 type Source = "web" | "discord_text" | "discord_voice" | "cron" | "timer";
 
@@ -557,39 +549,12 @@ async function handlePost(req: Request): Promise<Response> {
     }
   }
 
-  // --- L2 / L3 / L4 を並列取得 ---
-  // L2: 常時注入 (importance上位)、L3: 直近セッション要約、L4: semantic検索
-  // 重複を避けるため L2/L3 でヒットした ID は L4 から除外する。
-  const queryText = buildQueryText(history, currentUserMsg);
-  let alwaysOnFacts: RetrievedChunk[] = [];
-  let recentSummaries: RetrievedChunk[] = [];
-  let retrieved: RetrievedChunk[] = [];
-  const tRetrieveStart = Date.now();
-  try {
-    const [facts, summaries] = await Promise.all([
-      loadAlwaysOnFacts({ limit: 10, sessionId }),
-      loadRecentSummaries({ limit: 3, sessionId }),
-    ]);
-    alwaysOnFacts = facts;
-    recentSummaries = summaries;
-    const excludeIds = [...facts.map((f) => f.id), ...summaries.map((s) => s.id)];
-    retrieved = await retrieveRelevant({
-      queryText,
-      currentSessionId: sessionId,
-      limit: RETRIEVAL_TOP_K,
-      excludeIds,
-    });
-  } catch (e) {
-    // DB未起動等でもchatは続行可能にする
-    console.warn("[chat] retrieval failed:", e);
-  }
-  const tRetrieveMs = Date.now() - tRetrieveStart;
-
-  const memorySection = formatMemoryPrompt({
-    alwaysOnFacts,
-    recentSummaries,
-    relevantChunks: retrieved,
+  const memoryContext = await buildMemoryContext({
+    sessionId,
+    history,
+    currentUserMsg,
   });
+  const { memorySection, counts: memoryCounts, retrieveMs: tRetrieveMs } = memoryContext;
 
   const specialistTools = await yuiSpecialistTools();
 
@@ -1050,7 +1015,7 @@ async function handlePost(req: Request): Promise<Response> {
 
     if (process.env.NODE_ENV !== "production") {
       console.log(
-        `[chat] session=${sessionId.slice(0, 8)} retrieve=${tRetrieveMs}ms (L2=${alwaysOnFacts.length} L3=${recentSummaries.length} L4=${retrieved.length}) claude=${tClaudeMs}ms (dispatched=${toolCallCount}) in=${totalIn} out=${totalOut} cache_r=${cacheRead} cache_w=${cacheWrite} emo=${emotion} total=${Date.now() - t0}ms`
+        `[chat] session=${sessionId.slice(0, 8)} retrieve=${tRetrieveMs}ms (L2=${memoryCounts.alwaysOn} L3=${memoryCounts.recentSummaries} L4=${memoryCounts.relevant}) claude=${tClaudeMs}ms (dispatched=${toolCallCount}) in=${totalIn} out=${totalOut} cache_r=${cacheRead} cache_w=${cacheWrite} emo=${emotion} total=${Date.now() - t0}ms`
       );
     }
 
@@ -1086,11 +1051,7 @@ async function handlePost(req: Request): Promise<Response> {
       reply,
       emotion,
       sessionId,
-      memoryCounts: {
-        alwaysOn: alwaysOnFacts.length,
-        recentSummaries: recentSummaries.length,
-        relevant: retrieved.length,
-      },
+      memoryCounts,
       pendingJobs, // [{jobId, specialist}, ...] — クライアントはこれを見て SSE 経由で結果待機
       toolSummary: executedTools, // 次ターン送信時にこのターンの tool 実行履歴を Sonnet へ通告するため client が保持
     });

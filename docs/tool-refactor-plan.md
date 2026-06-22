@@ -156,7 +156,8 @@ async function buildChatSystemPrompt(args: {
 
 ### Phase R5: Memory Retrieval Builder の分離
 
-ステータス: 未着手
+ステータス: 完了
+コミット: `TBD メモリ検索文脈の構築を分離`
 
 目的:
 L2/L3/L4 memory retrieval と `memorySection` 構築を `src/lib/chat/memory-context.ts` に移す。
