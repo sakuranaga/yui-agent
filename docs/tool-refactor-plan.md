@@ -731,6 +731,37 @@ R18 の handler CRUD では見えない「モデル依存のツール選択・�
 - 期待ツールと必須引数の pass/fail が表示される
 - typecheck / lint / 既存 `eval:tools` が通る
 
+### Phase R23: CI / Local Gate Integration
+
+ステータス: 実装完了
+
+目的:
+手動で増やしてきた eval を、変更時に必ず回る決定的ゲートと、環境依存の任意ゲートに分ける。
+DB / 外部 API / ローカル LLM が無い CI でも最低限の退行検出を行い、開発環境ではモデル依存・統合系もまとめて実行できるようにする。
+
+実装予定:
+- `npm run check`
+- `npm run check:tool-model`
+- `npm run check:tool-integration`
+- `npm run check:tool-integration:strict`
+- `.github/workflows/ci.yml`
+
+分類:
+- `check`: typecheck / lint / deterministic `eval:tools`
+- `check:tool-model`: Gate LLM / Executor LLM / embedding dedup
+- `check:tool-integration`: 実 DB / health / reconciliation / domain handler eval
+- `check:tool-integration:strict`: 外部 API skip を許さない手元向け strict
+
+方針:
+- CI は DB / LLM / OAuth / embedding service を要求しない
+- LLM と外部 API の揺らぎは通常CIに入れず、手元または夜間ジョブ候補にする
+- 将来 DB service と pgvector を CI に用意できたら、`check:tool-integration` の一部をCIに昇格する
+
+完了条件:
+- `npm run check` が Docker 内で通る
+- `check:tool-model` と `check:tool-integration` の使い分けが package script で明確になる
+- GitHub Actions が `npm run check` を実行する
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
