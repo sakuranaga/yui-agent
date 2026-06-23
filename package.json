@@ -22,6 +22,7 @@
     "start": "next start -H 0.0.0.0",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --incremental false",
+    "eval:tools": "tsx scripts/tool-runtime-eval.ts",
     "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {

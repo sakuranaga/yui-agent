@@ -337,7 +337,7 @@ HTTP request parsing と chat turn orchestration を分ける。
 
 ### Phase R9: Regression / Eval
 
-ステータス: 未着手
+ステータス: 完了
 
 目的:
 リファクタリング完了後に、ツール実行の主要シナリオを通しで確認する。
@@ -381,6 +381,41 @@ docker compose exec -T web npm run lint
 docker compose restart web
 docker compose logs --since 1m web
 ```
+
+### Phase R10: Tool Runtime Auto Eval
+
+ステータス: 初期導入完了
+コミット: `TBD ツール実行の自動evalを追加`
+
+目的:
+手動回帰だけに依存せず、ツール実行基盤の決定的なロジックを固定 fixture で検証する。
+初期版では LLM / DB / 外部 API に依存しない範囲を対象にする。
+
+実装:
+- `scripts/tool-runtime-eval.ts`
+- `npm run eval:tools`
+
+対象:
+- request parser
+  - single message
+  - messages array
+  - assistant `toolSummary` の保持
+  - 画像添付 marker
+  - timer event の untrusted wrap
+  - invalid payload
+- response planner
+  - action missed
+  - executor declined fallback
+  - direct final outcome
+  - dedup skip final outcome
+- tool summary
+  - reminder / specialist query の要約
+
+次の拡張:
+- Gate fixture eval
+- Dedup precision / recall fixture
+- Confirm recovery fixture
+- 実 DB を使う integration eval
 
 ## 4. コミット方針
 
