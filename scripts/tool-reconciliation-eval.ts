@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { sql } from "@/db/client";
 import {
+  applySafeReconciliationFixes,
   collectReconciliationIssues,
   type ReconciliationIssue,
 } from "./tool-reconciliation-report";
@@ -12,6 +13,19 @@ const oldTs = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
 function countKind(issues: ReconciliationIssue[], kind: ReconciliationIssue["kind"]): number {
   return issues.filter((i) => i.kind === kind).length;
 }
+
+function hasError(issues: ReconciliationIssue[]): boolean {
+  return issues.some((issue) => issue.severity === "error");
+}
+
+const evalOptions = {
+  pendingMinutes: 60,
+  orphanPendingMinutes: 5,
+  executingMinutes: 60,
+  runningTaskMinutes: 30,
+  confirmFinalGraceMinutes: 2,
+  sessionIdPrefix: runId,
+};
 
 async function seedFixtures() {
   await sql`
@@ -74,14 +88,7 @@ async function main() {
     await cleanup();
     await seedFixtures();
 
-    const issues = await collectReconciliationIssues({
-      pendingMinutes: 60,
-      orphanPendingMinutes: 5,
-      executingMinutes: 60,
-      runningTaskMinutes: 30,
-      confirmFinalGraceMinutes: 2,
-      sessionIdPrefix: runId,
-    });
+    const issues = await collectReconciliationIssues(evalOptions);
 
     assert.equal(countKind(issues, "stale_pending_confirmation"), 2);
     assert.equal(countKind(issues, "orphan_pending_confirmation"), 1);
@@ -90,11 +97,31 @@ async function main() {
     assert.equal(countKind(issues, "executed_reservation_without_confirm_final"), 1);
     assert.equal(countKind(issues, "confirm_final_without_executed_reservation"), 1);
     assert.equal(issues.length, 7);
+    assert.equal(hasError(issues), true);
+
+    const fixResult = await applySafeReconciliationFixes(issues);
+    assert.equal(fixResult.fixedPendingConfirmations, 2);
+    assert.equal(fixResult.fixedRunningTasks, 1);
+    assert.equal(fixResult.skipped, 3);
+
+    const afterFix = await collectReconciliationIssues(evalOptions);
+    assert.equal(countKind(afterFix, "stale_pending_confirmation"), 0);
+    assert.equal(countKind(afterFix, "orphan_pending_confirmation"), 0);
+    assert.equal(countKind(afterFix, "stale_running_task"), 0);
+    assert.equal(countKind(afterFix, "stale_executing_reservation"), 1);
+    assert.equal(countKind(afterFix, "executed_reservation_without_confirm_final"), 1);
+    assert.equal(countKind(afterFix, "confirm_final_without_executed_reservation"), 1);
+    assert.equal(afterFix.length, 3);
+    assert.equal(hasError(afterFix), true);
 
     console.log("Tool reconciliation eval");
     for (const issue of issues) {
       console.log(`ok - ${issue.kind} id=${issue.id}`);
     }
+    console.log(
+      `ok - safe fix pending=${fixResult.fixedPendingConfirmations} running=${fixResult.fixedRunningTasks} skipped=${fixResult.skipped}`,
+    );
+    console.log(`ok - after safe fix remaining=${afterFix.length}`);
     console.log(`\n${issues.length}/7 reconciliation fixtures detected`);
   } finally {
     await cleanup();

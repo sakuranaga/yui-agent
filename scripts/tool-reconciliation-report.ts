@@ -29,6 +29,12 @@ export type ReconciliationOptions = {
   sessionIdPrefix?: string;
 };
 
+export type ReconciliationFixResult = {
+  fixedPendingConfirmations: number;
+  fixedRunningTasks: number;
+  skipped: number;
+};
+
 type RawIssueRow = {
   kind: ReconciliationIssue["kind"];
   severity: ReconciliationSeverity;
@@ -67,6 +73,10 @@ function mapRow(row: RawIssueRow): ReconciliationIssue {
 function scopedSql(sessionIdPrefix?: string) {
   if (!sessionIdPrefix) return sql``;
   return sql`AND COALESCE(t.session_id, l.scope_key, '') LIKE ${`${sessionIdPrefix}%`}`;
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values.filter((v) => Number.isInteger(v) && v > 0))];
 }
 
 export async function collectReconciliationIssues(
@@ -220,7 +230,60 @@ export async function collectReconciliationIssues(
     });
 }
 
-function printIssues(issues: ReconciliationIssue[]) {
+export async function applySafeReconciliationFixes(
+  issues: ReconciliationIssue[],
+): Promise<ReconciliationFixResult> {
+  const pendingIds = uniqueNumbers(
+    issues
+      .filter(
+        (issue) =>
+          issue.kind === "stale_pending_confirmation" ||
+          issue.kind === "orphan_pending_confirmation",
+      )
+      .map((issue) => issue.id),
+  );
+  const runningTaskIds = uniqueNumbers(
+    issues.filter((issue) => issue.kind === "stale_running_task").map((issue) => issue.id),
+  );
+  const skipped = issues.filter(
+    (issue) =>
+      issue.kind !== "stale_pending_confirmation" &&
+      issue.kind !== "orphan_pending_confirmation" &&
+      issue.kind !== "stale_running_task",
+  ).length;
+
+  let fixedPendingConfirmations = 0;
+  let fixedRunningTasks = 0;
+
+  if (pendingIds.length > 0) {
+    const rows = await sql<Array<{ id: number }>>`
+      UPDATE tool_execution_log
+      SET status = 'cancelled', updated_at = now()
+      WHERE id = ANY(${pendingIds}::bigint[])
+        AND status = 'pending_confirmation'
+      RETURNING id
+    `;
+    fixedPendingConfirmations = rows.length;
+  }
+
+  if (runningTaskIds.length > 0) {
+    const rows = await sql<Array<{ id: number }>>`
+      UPDATE tasks
+      SET
+        status = 'failed',
+        completed_at = now(),
+        error = COALESCE(error, 'reconciliation: stale running task marked failed')
+      WHERE id = ANY(${runningTaskIds}::bigint[])
+        AND status = 'running'
+      RETURNING id
+    `;
+    fixedRunningTasks = rows.length;
+  }
+
+  return { fixedPendingConfirmations, fixedRunningTasks, skipped };
+}
+
+function printIssues(issues: ReconciliationIssue[], fixResult?: ReconciliationFixResult) {
   console.log("Tool reconciliation dry-run");
   if (issues.length === 0) {
     console.log("[ok] no reconciliation candidates");
@@ -241,18 +304,33 @@ function printIssues(issues: ReconciliationIssue[]) {
     ].filter(Boolean);
     console.log(`- ${parts.join(" ")}`);
   }
+  if (fixResult) {
+    console.log("fix result:");
+    console.log(`- pending confirmations cancelled: ${fixResult.fixedPendingConfirmations}`);
+    console.log(`- running tasks marked failed: ${fixResult.fixedRunningTasks}`);
+    console.log(`- skipped unsafe/manual issues: ${fixResult.skipped}`);
+  }
 }
 
 async function main() {
   const json = process.argv.includes("--json");
   const strict = process.argv.includes("--strict");
+  const fix = process.argv.includes("--fix");
   const issues = await collectReconciliationIssues();
-  const hasError = issues.some((issue) => issue.severity === "error");
-  const shouldFail = strict ? issues.length > 0 : hasError;
+  const fixResult = fix ? await applySafeReconciliationFixes(issues) : undefined;
+  const remainingIssues = fix ? await collectReconciliationIssues() : issues;
+  const hasError = remainingIssues.some((issue) => issue.severity === "error");
+  const shouldFail = strict ? remainingIssues.length > 0 : hasError;
   if (json) {
-    console.log(JSON.stringify({ ok: !shouldFail, issues }, null, 2));
+    console.log(
+      JSON.stringify(
+        { ok: !shouldFail, issues: remainingIssues, fixedFromInitialIssues: fixResult },
+        null,
+        2,
+      ),
+    );
   } else {
-    printIssues(issues);
+    printIssues(fix ? remainingIssues : issues, fixResult);
   }
   process.exitCode = shouldFail ? 1 : 0;
 }

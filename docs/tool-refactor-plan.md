@@ -641,6 +641,36 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 - `eval:tool-reconcile` が fixture の不整合を検出できる
 - typecheck / lint / 既存 eval が通る
 
+### Phase R20: Tool Reconciliation Safe Fix
+
+ステータス: 実装完了
+
+目的:
+R19 で検出できるようになった復旧候補のうち、外部 API の side effect に触れず DB 内で安全に修復できるものだけを `reconcile:tools --fix` で処理する。
+
+実装予定:
+- `reconcile:tools --fix`
+- `reconcile:tools --json --fix`
+- `eval:tool-reconcile` に fix 前後の fixture 検証を追加
+
+fix 対象:
+- 古い `pending_confirmation` を `cancelled` にする
+- confirm token 未紐付けの古い `pending_confirmation` を `cancelled` にする
+- 古い `tasks.status='running'` を `failed` にし、error に reconciliation reason を残す
+
+fix しない対象:
+- 古い `executing` reservation
+- `executed` reservation はあるが `confirmFinal` が無いもの
+- `confirmFinal` はあるが executed reservation が無いもの
+- 外部 API の replay / compensate / backfill
+
+完了条件:
+- `--fix` なしは従来どおり read-only
+- `--fix` は修復対象件数とスキップ対象件数を表示する
+- fixture eval で fix 後に error 系 issue が消える
+- warn 系 issue は必要に応じて残る
+- typecheck / lint / 既存 eval が通る
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする

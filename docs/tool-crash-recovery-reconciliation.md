@@ -125,6 +125,10 @@ docker compose exec -T web npm run observe:tools
 `reconcile:tools` は読み取り専用 dry-run として、古い `pending_confirmation` / `executing` / `running task` /
 confirm final と reservation の不整合を検出する。初期実装では外部 API の replay や DB 自動補完は行わない。
 
+`reconcile:tools --fix` は DB 内で安全に閉じるものだけを修復する。
+対象は古い `pending_confirmation` の `cancelled` 化と、古い `tasks.status='running'` の `failed` 化に限定する。
+古い `executing` reservation、confirm final と reservation の不一致、外部 API の replay / compensate / backfill は自動修復しない。
+
 ## 6. 次に実装するなら
 
 優先順位:
