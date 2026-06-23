@@ -26,6 +26,7 @@ export type ReconciliationOptions = {
   executingMinutes?: number;
   runningTaskMinutes?: number;
   confirmFinalGraceMinutes?: number;
+  confirmFinalLookbackHours?: number;
   sessionIdPrefix?: string;
 };
 
@@ -90,6 +91,8 @@ export async function collectReconciliationIssues(
     options.runningTaskMinutes ?? Number(process.env.TOOL_RECONCILE_RUNNING_TASK_MINUTES ?? 30);
   const confirmFinalGraceMinutes =
     options.confirmFinalGraceMinutes ?? Number(process.env.TOOL_RECONCILE_CONFIRM_FINAL_GRACE_MINUTES ?? 2);
+  const confirmFinalLookbackHours =
+    options.confirmFinalLookbackHours ?? Number(process.env.TOOL_RECONCILE_CONFIRM_FINAL_HOURS ?? 24);
   const sessionIdPrefix = options.sessionIdPrefix ?? process.env.TOOL_RECONCILE_SESSION_PREFIX;
 
   const stalePending = await sql<RawIssueRow[]>`
@@ -201,14 +204,22 @@ export async function collectReconciliationIssues(
       EXTRACT(EPOCH FROM (now() - COALESCE(t.completed_at, t.created_at))) / 60 AS age_minutes,
       'confirm final exists but executed reservation is missing; inspect dedup log'::text AS action
     FROM tasks t
-    LEFT JOIN tool_execution_log l
-      ON l.confirm_token = t.output->'confirmFinal'->>'token'
-     AND l.status = 'executed'
+    LEFT JOIN tool_execution_log l ON l.confirm_token = t.output->'confirmFinal'->>'token'
     WHERE t.output ? 'confirmFinal'
       AND t.output->'confirmFinal'->>'success' = 'true'
       AND t.output->'confirmFinal'->>'token' IS NOT NULL
       AND COALESCE(t.completed_at, t.created_at) < now() - (${confirmFinalGraceMinutes} || ' minutes')::interval
-      AND l.id IS NULL
+      AND COALESCE(t.completed_at, t.created_at) >= now() - (${confirmFinalLookbackHours} || ' hours')::interval
+      AND (
+        l.id IS NULL
+        OR NOT (
+          l.status = 'executed'
+          OR (
+            t.output->'confirmFinal'->>'toolName' = 'gcal_create_event'
+            AND l.status = 'cancelled'
+          )
+        )
+      )
       ${scopedSql(sessionIdPrefix)}
     ORDER BY COALESCE(t.completed_at, t.created_at) ASC
     LIMIT 50

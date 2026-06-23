@@ -762,6 +762,29 @@ DB / 外部 API / ローカル LLM が無い CI でも最低限の退行検出�
 - `check:tool-model` と `check:tool-integration` の使い分けが package script で明確になる
 - GitHub Actions が `npm run check` を実行する
 
+### Phase R24: Reconciliation Historical Warning Suppression
+
+ステータス: 実装完了
+
+目的:
+`reconcile:tools` に残る過去データ由来の `confirm_final_without_executed_reservation` warn を整理し、新しい異常を埋もれさせない。
+
+確認結果:
+- 6月21日の warn は `tool_execution_log` 導入/保持前の confirm final 履歴で、reservation row が存在しない
+- 6月23日の warn は作成後に削除された予定で、`gcal_create_event` reservation が `cancelled` になっている正常ケース
+
+実装予定:
+- confirm final / reservation 不一致の検出対象を直近 window に限定する
+- window は `TOOL_RECONCILE_CONFIRM_FINAL_HOURS` で変更可能、既定 24h
+- `gcal_create_event` の successful confirm final は、reservation が `executed` または `cancelled` なら正常扱いにする
+- fixture eval に old historical row と cancelled-create row を追加する
+
+完了条件:
+- 現DBで `reconcile:tools` の既知 warn が消える
+- 古い historical warn は通常検出から除外される
+- 新しい no-log confirm final は引き続き warn になる
+- 削除済み create reservation (`cancelled`) は warn にならない
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする

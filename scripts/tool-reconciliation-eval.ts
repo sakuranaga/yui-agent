@@ -9,6 +9,7 @@ import {
 const runId = `tool-reconcile-eval-${Date.now()}`;
 const sessionId = `${runId}-session`;
 const oldTs = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+const historicalTs = new Date(Date.now() - 48 * 60 * 60_000).toISOString();
 
 function countKind(issues: ReconciliationIssue[], kind: ReconciliationIssue["kind"]): number {
   return issues.filter((i) => i.kind === kind).length;
@@ -24,6 +25,7 @@ const evalOptions = {
   executingMinutes: 60,
   runningTaskMinutes: 30,
   confirmFinalGraceMinutes: 2,
+  confirmFinalLookbackHours: 24,
   sessionIdPrefix: runId,
 };
 
@@ -35,7 +37,8 @@ async function seedFixtures() {
       (${sessionId}, 'gcal_create_event', '2026-06-24T11:00:00+09:00', ${`${runId} stale pending`}, 'pending_confirmation', ${`${runId}-pending-token`}, ${JSON.stringify({ runId })}::jsonb, ${oldTs}, ${oldTs}),
       (${sessionId}, 'gcal_delete_event', '2026-06-24T12:00:00+09:00', ${`${runId} orphan pending`}, 'pending_confirmation', NULL, ${JSON.stringify({ runId })}::jsonb, ${oldTs}, ${oldTs}),
       (${sessionId}, 'gcal_create_event', '2026-06-24T13:00:00+09:00', ${`${runId} stale executing`}, 'executing', NULL, ${JSON.stringify({ runId })}::jsonb, ${oldTs}, ${oldTs}),
-      (${sessionId}, 'gcal_create_event', '2026-06-24T14:00:00+09:00', ${`${runId} executed no final`}, 'executed', ${`${runId}-executed-no-final`}, ${JSON.stringify({ runId })}::jsonb, ${oldTs}, ${oldTs})
+      (${sessionId}, 'gcal_create_event', '2026-06-24T14:00:00+09:00', ${`${runId} executed no final`}, 'executed', ${`${runId}-executed-no-final`}, ${JSON.stringify({ runId })}::jsonb, ${oldTs}, ${oldTs}),
+      (${sessionId}, 'gcal_create_event', '2026-06-24T15:00:00+09:00', ${`${runId} cancelled create`}, 'cancelled', ${`${runId}-cancelled-create`}, ${JSON.stringify({ runId })}::jsonb, ${oldTs}, ${oldTs})
   `;
 
   await sql`
@@ -53,6 +56,48 @@ async function seedFixtures() {
         ${oldTs},
         ${oldTs},
         NULL
+      ),
+      (
+        ${sessionId},
+        'yui',
+        'schedule',
+        'specialist',
+        'succeeded',
+        ${JSON.stringify({ runId, fixture: "historical_final_without_executed" })}::jsonb,
+        ${JSON.stringify({
+          state: "completed",
+          confirmFinal: {
+            token: `${runId}-historical-final-no-executed`,
+            toolName: "gcal_create_event",
+            success: true,
+            state: "completed",
+            result: { event: { id: `${runId}-historical-event` } },
+          },
+        })}::jsonb,
+        ${historicalTs},
+        ${historicalTs},
+        ${historicalTs}
+      ),
+      (
+        ${sessionId},
+        'yui',
+        'schedule',
+        'specialist',
+        'succeeded',
+        ${JSON.stringify({ runId, fixture: "cancelled_create_is_ok" })}::jsonb,
+        ${JSON.stringify({
+          state: "completed",
+          confirmFinal: {
+            token: `${runId}-cancelled-create`,
+            toolName: "gcal_create_event",
+            success: true,
+            state: "completed",
+            result: { event: { id: `${runId}-cancelled-event` } },
+          },
+        })}::jsonb,
+        ${oldTs},
+        ${oldTs},
+        ${oldTs}
       ),
       (
         ${sessionId},
