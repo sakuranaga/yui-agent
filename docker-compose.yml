@@ -80,6 +80,16 @@ services:
       # デバッグレポート: =1 で各チャットターンの内部状態 (pick/executor/L2/エラー) を
       # ReportPanel に表示。.env で DEBUG_REPORTS=1 にして restart で有効化。
       - DEBUG_REPORTS=${DEBUG_REPORTS:-}
+      # W2 rollback 用。通常は 0 のまま、scheduler は worker が唯一の owner。
+      - WEB_LEGACY_SCHEDULER_ENABLED=${WEB_LEGACY_SCHEDULER_ENABLED:-0}
+      # W3 rollback 用。通常は 0 のまま、maintenance は worker が担当。
+      - WEB_LEGACY_MAINTENANCE_ENABLED=${WEB_LEGACY_MAINTENANCE_ENABLED:-0}
+      # W5 rollback 用。通常は 0 のまま、specialist job は worker が tasks から claim する。
+      - WEB_LEGACY_SPECIALIST_RUNNER_ENABLED=${WEB_LEGACY_SPECIALIST_RUNNER_ENABLED:-0}
+      # W6 rollback 用。通常は 0 のまま、confirm Phase B は worker が実行する。
+      - WEB_LEGACY_CONFIRM_EXECUTION_ENABLED=${WEB_LEGACY_CONFIRM_EXECUTION_ENABLED:-0}
+      # W7 rollback 用。通常は 0 のまま、post-persist jobs は worker queue に積む。
+      - WEB_LEGACY_POST_PERSIST_JOBS_ENABLED=${WEB_LEGACY_POST_PERSIST_JOBS_ENABLED:-0}
     # 外部ホスト (= 自宅 LAN / Tailscale / VPS で TTS / Embedding を別サーバ運用する場合) を
     # コンテナ内から解決したい時は、`.env` で `EXTRA_HOSTS_TTS` / `EXTRA_HOSTS_EMBED` 等を
     # 定義した上で、ここに `extra_hosts:` セクションを追加してください。
@@ -93,6 +103,56 @@ services:
       valkey:
         condition: service_healthy
     command: npm run dev
+    tty: true
+    stdin_open: true
+
+  worker:
+    build:
+      context: .
+      target: dev
+    container_name: yui-agent-worker
+    init: true
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - next_cache:/app/.next
+    environment:
+      - NODE_ENV=development
+      - DEBUG_YUI_PROMPT=${DEBUG_YUI_PROMPT:-0}
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:3000/api/spotify/callback}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
+      - SAFE_FETCH_ALLOWED_HOSTS=${SAFE_FETCH_ALLOWED_HOSTS:-}
+      - TTS_URL=${TTS_URL:-}
+      - DATABASE_URL=${DATABASE_URL:-postgres://vroid:vroid@postgres:5432/vroid}
+      - EMBED_URL=${EMBED_URL:-}
+      - EMBED_MODEL=${EMBED_MODEL:-bge-m3}
+      - EMBED_DIMENSIONS=${EMBED_DIMENSIONS:-1024}
+      - MORNING_CHECK_HOUR_JST=${MORNING_CHECK_HOUR_JST:-9}
+      - DISCORD_SESSION_ID=${DISCORD_SESSION_ID:-}
+      - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379}
+      - DEBUG_REPORTS=${DEBUG_REPORTS:-}
+      - WORKER_SCHEDULER_ENABLED=${WORKER_SCHEDULER_ENABLED:-1}
+      - WORKER_MAINTENANCE_ENABLED=${WORKER_MAINTENANCE_ENABLED:-1}
+      - WORKER_SPECIALIST_ENABLED=${WORKER_SPECIALIST_ENABLED:-1}
+      - WORKER_CONFIRM_EXECUTION_ENABLED=${WORKER_CONFIRM_EXECUTION_ENABLED:-1}
+      - WORKER_BACKGROUND_JOBS_ENABLED=${WORKER_BACKGROUND_JOBS_ENABLED:-1}
+      - WORKER_RECOVERY_ENABLED=${WORKER_RECOVERY_ENABLED:-1}
+      - WEB_LEGACY_SCHEDULER_ENABLED=${WEB_LEGACY_SCHEDULER_ENABLED:-0}
+      - WEB_LEGACY_MAINTENANCE_ENABLED=${WEB_LEGACY_MAINTENANCE_ENABLED:-0}
+      - WEB_LEGACY_SPECIALIST_RUNNER_ENABLED=${WEB_LEGACY_SPECIALIST_RUNNER_ENABLED:-0}
+      - WEB_LEGACY_CONFIRM_EXECUTION_ENABLED=${WEB_LEGACY_CONFIRM_EXECUTION_ENABLED:-0}
+      - WEB_LEGACY_POST_PERSIST_JOBS_ENABLED=${WEB_LEGACY_POST_PERSIST_JOBS_ENABLED:-0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    command: npm run worker
     tty: true
     stdin_open: true
 

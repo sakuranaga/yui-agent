@@ -13,7 +13,7 @@
  * 呼出元 (SDK listener) は結果を見ない (= fire-and-forget)。
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { fetchTrackTrivia } from "@/lib/music-trivia";
+import { enqueueBackgroundJob } from "@/lib/jobs/background";
 
 export async function POST(req: NextRequest) {
   let body: { title?: string; artist?: string; trackUri?: string };
@@ -29,12 +29,18 @@ export async function POST(req: NextRequest) {
   const artist = typeof body.artist === "string" ? body.artist : null;
   const trackUri = typeof body.trackUri === "string" ? body.trackUri : null;
 
-  // fire-and-forget: 結果は cache に入る、caller は待たない
-  void fetchTrackTrivia(title, artist, trackUri).catch((e) => {
+  try {
+    await enqueueBackgroundJob({
+      jobType: "music.prefetch_trivia",
+      payload: { title, artist, trackUri },
+      dedupKey: `music.prefetch_trivia:${trackUri ?? `${title}:${artist ?? ""}`}`,
+      priority: 140,
+    });
+  } catch (e) {
     if (process.env.NODE_ENV !== "production") {
-      console.warn("[prefetch-trivia] fetch failed:", e instanceof Error ? e.message : e);
+      console.warn("[prefetch-trivia] enqueue failed:", e instanceof Error ? e.message : e);
     }
-  });
+  }
 
   return NextResponse.json({ ok: true });
 }

@@ -6,7 +6,7 @@ import {
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import {
   buildApiMessages,
-  buildExecutorContext,
+  buildToolContextBundle,
   loadHistoryTimestamps,
 } from "@/lib/chat/context-builder";
 import { buildChatSystemPrompt } from "@/lib/chat/system-prompt-builder";
@@ -14,13 +14,19 @@ import { buildMemoryContext } from "@/lib/chat/memory-context";
 import { parseChatRequest } from "@/lib/chat/request-parser";
 import { briefToolInput } from "@/lib/chat/tool-summary";
 import {
+  enqueuePostPersistJobs,
   persistChatTurn,
-  runPostPersistJobs,
+  runPostPersistJobsNow,
   saveUserImages,
 } from "@/lib/chat/persistence";
 import { runToolOrchestrator } from "@/lib/chat/tool-orchestrator";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 import { tickMaintenance } from "@/lib/startup";
+import {
+  beginUserTurn,
+  drainQueuedProactiveSpeech,
+  finishUserTurn,
+} from "@/lib/proactive-turn";
 import { yuiSpecialistTools } from "@/lib/specialists/registry";
 import { toolsForContext } from "@/lib/tools/runtime";
 import { createDispatchLedger } from "@/lib/tools/dispatch";
@@ -28,7 +34,8 @@ import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
 import { clientError } from "@/lib/api-error";
-import { pushToSession, pushDebugReport } from "@/lib/jobs/events";
+import { pushDebugReport } from "@/lib/jobs/events";
+import { pushDurableToSession } from "@/lib/jobs/outbox";
 
 // 主ターンモデルは lib/llm.ts の "main" role で解決 (env: ANTHROPIC_MODEL, default sonnet)。
 // 出力上限はモデル別の entry.maxTokens (#206 §8.10) に委譲 (= main 呼びで maxTokens を渡さない)。
@@ -41,6 +48,9 @@ async function isApiKeyConfigured(): Promise<boolean> {
   const key = cfg.apiKey;
   return !!key && key.startsWith("sk-ant-") && !key.includes("xxxx");
 }
+
+const LEGACY_POST_PERSIST_JOBS_ENABLED =
+  process.env.WEB_LEGACY_POST_PERSIST_JOBS_ENABLED === "1";
 
 export async function POST(req: Request): Promise<Response> {
   return withTrace(`chat:${Date.now().toString(36)}`, () => handlePost(req));
@@ -83,6 +93,16 @@ async function handlePost(req: Request): Promise<Response> {
     currentUserImages,
     currentUserMsg,
   } = parsed;
+  const isUserTurn = source !== "cron" && source !== "timer";
+  let turnActive = false;
+  const finishTurnAndDrain = async () => {
+    if (!turnActive) return;
+    await finishUserTurn(sessionId);
+    turnActive = false;
+    void drainQueuedProactiveSpeech(sessionId).catch((e) =>
+      console.warn("[chat] proactive drain failed:", e),
+    );
+  };
 
   // デバッグレポート (env DEBUG_REPORTS=1 時のみ ReportPanel に出す)。turn 中に内部状態を貯め、
   // 成功/エラー時に push。pick 誤選択 / L2 誤爆 / LLM エラー等をログ調査なしで UI で見るため。
@@ -149,6 +169,10 @@ async function handlePost(req: Request): Promise<Response> {
 
   try {
     const tClaudeStart = Date.now();
+    if (isUserTurn) {
+      await beginUserTurn(sessionId);
+      turnActive = true;
+    }
 
     // ツール実行分離フロー (docs/tool-dispatch-redesign.md):
     //   B (会話 main, tools 無し) → ack → Executor (clean prompt でツール分離・判定) →
@@ -216,23 +240,28 @@ async function handlePost(req: Request): Promise<Response> {
     //   画像依存の tool 起動 (画像を見て検索/保存/予定化) は現状 #2 が判断できない (Codex 実装 Medium)。
     // 【後回し (ユーザー判断: specialist 機構の再設計時)】judge skip かつ #1 未回答時の C 起動連携 (Codex 実装 High①)。
     // RECENT_HISTORY_TURNS は executor.ts のレバー参照、テストで調整。
-    const { recentHistory, runtimeFacts } = buildExecutorContext({
+    const toolContext = buildToolContextBundle({
       messages,
       currentUserMsg,
       historyTimestamps,
       toolMode,
       source,
     });
+    const { executorHistory: recentHistory, runtimeFacts } = toolContext;
     if (process.env.NODE_ENV !== "production") {
-      console.log(`[executor-input] recentHistory=${recentHistory.length}件(user-only) last="${String(recentHistory[recentHistory.length - 1]?.content).slice(0, 30)}"`);
+      console.log(
+        `[executor-input] recentHistory=${recentHistory.length}件 refs=${toolContext.referenceClaims.length} retrieval="${toolContext.retrievalQuery.slice(0, 60)}" last="${String(recentHistory[recentHistory.length - 1]?.content).slice(0, 30)}"`,
+      );
     }
 
-    const isUserTurn = source !== "cron" && source !== "timer";
     const toolOrchestrator = await runToolOrchestrator({
       sessionId,
       currentUserMsg,
       messages,
       recentHistory,
+      gateHistory: toolContext.gateHistory,
+      retrievalQuery: toolContext.retrievalQuery,
+      referenceClaims: toolContext.referenceClaims,
       runtimeFacts,
       envBlock,
       registryTools,
@@ -339,6 +368,7 @@ async function handlePost(req: Request): Promise<Response> {
     const tClaudeMs = Date.now() - tClaudeStart;
 
     if (!response && !finalIterText && pendingJobs.length === 0 && toolCallCount === 0) {
+      await finishTurnAndDrain();
       return Response.json({ error: "no response from claude" }, { status: 502 });
     }
 
@@ -383,6 +413,7 @@ async function handlePost(req: Request): Promise<Response> {
       console.warn(
         `[chat] empty reply (stop_reason=${response?.stop_reason ?? "none"}, tool_calls=${toolCallCount})`
       );
+      await finishTurnAndDrain();
       return Response.json(
         { error: "empty reply from claude", stop_reason: response?.stop_reason ?? "none" },
         { status: 502 }
@@ -404,12 +435,14 @@ async function handlePost(req: Request): Promise<Response> {
     // source=cron / timer は HTTP の caller が frontend ではない
     // (= internalFetch 経由) ので、即時 reply を SSE で session の frontend にも届ける。
     if (source === "cron" || source === "timer") {
-      pushToSession(sessionId, {
+      await pushDurableToSession(sessionId, {
         type: "yui_message",
         jobId: -1,
         text: reply,
         emotion,
         specialistId: undefined,
+      }, {
+        dedupKey: `${source}:reply:${sessionId}:${Date.now()}`,
       });
     }
 
@@ -437,7 +470,11 @@ async function handlePost(req: Request): Promise<Response> {
     });
     void writePromise
       .then(({ isPrivate }) =>
-        runPostPersistJobs({
+        LEGACY_POST_PERSIST_JOBS_ENABLED ? runPostPersistJobsNow({
+          sessionId,
+          currentUserMsg,
+          isPrivate,
+        }) : enqueuePostPersistJobs({
           sessionId,
           currentUserMsg,
           isPrivate,
@@ -446,6 +483,7 @@ async function handlePost(req: Request): Promise<Response> {
       .catch((e) => console.warn("[chat] raw write failed:", e));
 
     pushDebugReport(sessionId, [`**source=${source}** \`${currentUserMsg.slice(0, 40)}\``, ...dbg]);
+    await finishTurnAndDrain();
 
     return Response.json({
       reply,
@@ -456,6 +494,13 @@ async function handlePost(req: Request): Promise<Response> {
       toolSummary: executedTools, // 次ターン送信時にこのターンの tool 実行履歴を Sonnet へ通告するため client が保持
     });
   } catch (e) {
+    if (turnActive) {
+      try {
+        await finishTurnAndDrain();
+      } catch (err) {
+        console.warn("[chat] finish proactive turn failed:", err);
+      }
+    }
     // デバッグレポート: 内部エラー (credit 切れ / LLM 失敗 / timeout 等) を ReportPanel に出す。
     // **dev かつ DEBUG_REPORTS=1** の時のみ (debugReportsEnabled、production では無効)。owner 自己
     // デバッグ用なので raw message を載せる (client 向け HTTP sanitize は下の clientError が担当)。

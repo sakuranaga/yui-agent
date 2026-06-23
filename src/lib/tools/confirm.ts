@@ -12,12 +12,12 @@
  *     - executePendingTool で再検証 (callableBy / allowedModes / confirmationPolicy /
  *       isAvailable) → handler 実行 → 結果 SSE push + Yui 再 turn dispatch
  */
-import { pushToSession } from "@/lib/jobs/events";
 import { randomBytes } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { tasks } from "@/db/schema";
+import { tasks, toolConfirmJobs, type ToolConfirmJob } from "@/db/schema";
 import { cacheGet, cacheSet, cacheDel } from "@/lib/cache";
+import { pushDurableToSession } from "@/lib/jobs/outbox";
 import type {
   ConfirmationPolicy,
   ToolCaller,
@@ -75,6 +75,91 @@ async function removeFromSessionIndex(sessionId: string, token: string): Promise
   const next = cur.filter((t) => t !== token);
   if (next.length === 0) await cacheDel(SESSION_INDEX_KEY(sessionId));
   else await cacheSet(SESSION_INDEX_KEY(sessionId), next, CONFIRM_TTL_SEC);
+}
+
+function serializePending(pending: ConfirmPending): Record<string, unknown> {
+  return pending as unknown as Record<string, unknown>;
+}
+
+function pendingFromConfirmJob(row: ToolConfirmJob): ConfirmPending {
+  const pending = row.pending as ConfirmPending;
+  return {
+    ...pending,
+    status: row.status === "confirmed" || row.status === "running" ? "confirmed" : pending.status,
+    result: row.result ?? pending.result,
+    failReason: row.failReason ?? pending.failReason,
+  };
+}
+
+async function persistConfirmPending(token: string, pending: ConfirmPending): Promise<void> {
+  await db
+    .insert(toolConfirmJobs)
+    .values({
+      token,
+      sessionId: pending.sessionId,
+      toolName: pending.toolName,
+      status: pending.status,
+      pending: serializePending(pending),
+    })
+    .onConflictDoUpdate({
+      target: toolConfirmJobs.token,
+      set: {
+        sessionId: pending.sessionId,
+        toolName: pending.toolName,
+        status: pending.status,
+        pending: serializePending(pending),
+        updatedAt: new Date(),
+      },
+    });
+}
+
+async function updateConfirmJob(args: {
+  token: string;
+  status: ToolConfirmJob["status"];
+  result?: unknown;
+  failReason?: string | null;
+  lastError?: string | null;
+  decidedAt?: Date | null;
+  startedAt?: Date | null;
+  completedAt?: Date | null;
+}): Promise<void> {
+  await db
+    .update(toolConfirmJobs)
+    .set({
+      status: args.status,
+      result: args.result as Record<string, unknown> | undefined,
+      failReason: args.failReason ?? undefined,
+      lastError: args.lastError ?? undefined,
+      decidedAt: args.decidedAt ?? undefined,
+      startedAt: args.startedAt ?? undefined,
+      completedAt: args.completedAt ?? undefined,
+      updatedAt: new Date(),
+    })
+    .where(eq(toolConfirmJobs.token, args.token));
+}
+
+async function loadConfirmedPendingForExecution(token: string): Promise<ConfirmPending | null> {
+  const cached = await cacheGet<ConfirmPending>(PENDING_KEY(token));
+  if (cached?.status === "confirmed") return cached;
+
+  const [row] = await db
+    .select()
+    .from(toolConfirmJobs)
+    .where(eq(toolConfirmJobs.token, token))
+    .limit(1);
+  if (!row || (row.status !== "confirmed" && row.status !== "running")) return null;
+  return pendingFromConfirmJob(row);
+}
+
+async function loadPendingForFinalize(token: string): Promise<ConfirmPending | null> {
+  const cached = await cacheGet<ConfirmPending>(PENDING_KEY(token));
+  if (cached) return cached;
+  const [row] = await db
+    .select()
+    .from(toolConfirmJobs)
+    .where(eq(toolConfirmJobs.token, token))
+    .limit(1);
+  return row ? pendingFromConfirmJob(row) : null;
 }
 
 async function markTaskConfirmFinal(args: {
@@ -155,15 +240,19 @@ export async function requestUserConfirm(opts: {
     status: "pending",
     createdAt: Date.now(),
   };
+  await persistConfirmPending(token, pending);
   await cacheSet(PENDING_KEY(token), pending, CONFIRM_TTL_SEC);
   await addToSessionIndex(opts.sessionId, token);
 
-  pushToSession(opts.sessionId, {
+  await pushDurableToSession(opts.sessionId, {
     type: "tool_confirm_request",
     token,
     toolName: opts.toolName,
     summary: opts.summary,
     inputSnapshot: opts.inputSnapshot,
+  }, {
+    dedupKey: `tool-confirm:${token}:request`,
+    sourceJobId: token,
   });
   return { token };
 }
@@ -177,6 +266,12 @@ export async function applyConfirmDecision(
   if (!p) return { status: "denied", pending: null };
   if (p.status !== "pending") return { status: p.status, pending: p };
   p.status = decision;
+  await updateConfirmJob({
+    token,
+    status: decision,
+    decidedAt: new Date(),
+    completedAt: decision === "denied" ? new Date() : undefined,
+  });
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
 
   // denied は ここで SSE push + 内部 chat 再 turn まで完了 (= Yui「やめておきます」)
@@ -191,12 +286,15 @@ export async function applyConfirmDecision(
       reason: "user denied",
     });
     await removeFromSessionIndex(p.sessionId, token);
-    pushToSession(p.sessionId, {
+    await pushDurableToSession(p.sessionId, {
       type: "tool_confirm_result",
       token,
       toolName: p.toolName,
       success: false,
       reason: "user denied",
+    }, {
+      dedupKey: `tool-confirm:${token}:denied`,
+      sourceJobId: token,
     });
     void emitConfirmResult({
       sessionId: p.sessionId,
@@ -221,11 +319,18 @@ function callerMatches(declared: ToolCaller, actual: ToolCaller): boolean {
 }
 
 async function markFailed(token: string, reason: string): Promise<void> {
-  const p = await cacheGet<ConfirmPending>(PENDING_KEY(token));
+  const p = await loadPendingForFinalize(token);
   if (!p) return;
   p.status = "failed";
   p.failReason = reason;
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
+  await updateConfirmJob({
+    token,
+    status: "failed",
+    failReason: reason,
+    lastError: reason,
+    completedAt: new Date(),
+  });
   // dedup reservation を解放 (failed → 再試行を妨げない)。
   await finalizeReservationByToken(token, "failed");
   await markTaskConfirmFinal({
@@ -236,12 +341,15 @@ async function markFailed(token: string, reason: string): Promise<void> {
     reason,
   });
   await removeFromSessionIndex(p.sessionId, token);
-  pushToSession(p.sessionId, {
+  await pushDurableToSession(p.sessionId, {
     type: "tool_confirm_result",
     token,
     toolName: p.toolName,
     success: false,
     reason,
+  }, {
+    dedupKey: `tool-confirm:${token}:failed`,
+    sourceJobId: token,
   });
   // Phase B 再 turn: 失敗理由を Yui が会話に反映させる
   // (= 「再検証失敗で実行できませんでした、〜の理由です」を口頭報告)
@@ -258,11 +366,17 @@ async function markFailed(token: string, reason: string): Promise<void> {
 }
 
 async function markExecuted(token: string, result: unknown): Promise<void> {
-  const p = await cacheGet<ConfirmPending>(PENDING_KEY(token));
+  const p = await loadPendingForFinalize(token);
   if (!p) return;
   p.status = "executed";
   p.result = result;
   await cacheSet(PENDING_KEY(token), p, CONFIRM_TTL_SEC);
+  await updateConfirmJob({
+    token,
+    status: "executed",
+    result,
+    completedAt: new Date(),
+  });
   // dedup reservation を確定 (executed)。
   await finalizeReservationByToken(token, "executed");
   if (p.toolName === "gcal_delete_event") {
@@ -282,12 +396,15 @@ async function markExecuted(token: string, result: unknown): Promise<void> {
     result,
   });
   await removeFromSessionIndex(p.sessionId, token);
-  pushToSession(p.sessionId, {
+  await pushDurableToSession(p.sessionId, {
     type: "tool_confirm_result",
     token,
     toolName: p.toolName,
     success: true,
     result,
+  }, {
+    dedupKey: `tool-confirm:${token}:executed`,
+    sourceJobId: token,
   });
   // Phase B 再 turn: Yui に結果を踏まえた最終発話を生成させる (= specialist 完了報告と同経路)
   void emitConfirmResult({
@@ -307,9 +424,8 @@ async function markExecuted(token: string, result: unknown): Promise<void> {
  * background job として fire-and-forget で呼ぶ (= POST /api/tool-confirm の中)。
  */
 export async function executePendingTool(token: string): Promise<void> {
-  const pending = await cacheGet<ConfirmPending>(PENDING_KEY(token));
+  const pending = await loadConfirmedPendingForExecution(token);
   if (!pending) return;
-  if (pending.status !== "confirmed") return;
 
   // 1. registry から tool 再取得
   const tool: ToolDef | undefined = ALL_TOOLS.find((t) => t.name === pending.toolName);

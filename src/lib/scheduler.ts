@@ -194,6 +194,18 @@ async function findActiveSessionId(): Promise<string | null> {
 }
 
 async function firePromptToYui(args: { sessionId: string; prompt: string }): Promise<void> {
+  try {
+    const { maybeQueueCronPrompt } = await import("@/lib/proactive-turn");
+    const queued = await maybeQueueCronPrompt({
+      sessionId: args.sessionId,
+      prompt: args.prompt,
+      metadata: { producer: "scheduler" },
+    });
+    if (queued) return;
+  } catch (e) {
+    console.warn("[scheduler] proactive queue check failed:", e);
+  }
+
   const port = process.env.PORT ?? "3000";
   const url = `http://localhost:${port}/api/chat`;
   try {

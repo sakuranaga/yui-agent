@@ -94,7 +94,7 @@ export default function SecretaryCard() {
     const sid =
       window.localStorage.getItem(SESSION_STORAGE_KEY) ?? "card-no-session";
     const es = new EventSource(
-      `/api/chat/stream?session=${encodeURIComponent(sid)}`
+      `/api/chat/stream?session=${encodeURIComponent(sid)}&durable=0`
     );
     esRef.current = es;
     const onStats = () => void reload();

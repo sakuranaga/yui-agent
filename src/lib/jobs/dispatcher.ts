@@ -20,14 +20,14 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { db } from "@/db/client";
-import { tasks } from "@/db/schema";
+import { tasks, type Task } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { buildYuiSystemPrompt } from "@/app/api/chat/yui-prompt";
 import { loadPersona } from "@/lib/persona";
 import { findSpecialistByYuiToolName } from "@/lib/specialists/registry";
 import { runSpecialist } from "@/lib/specialists/runner";
 import { generateReport } from "@/lib/specialists/report";
-import { pushToSession } from "@/lib/jobs/events";
+import { pushDurableToSession } from "@/lib/jobs/outbox";
 import { addXp } from "@/lib/xp";
 import { classifyEmotion } from "@/lib/emotion";
 import { writeAssistantMessage } from "@/lib/memory";
@@ -39,8 +39,16 @@ import { callLlm, withTrace } from "@/lib/llm";
 // 短い口頭報告セリフなので固定の小さい上限 (#206 §8.10: env ではなく固定値。
 // 外すと entry.maxTokens=8192 まで開いて挙動が変わるため voice には十分な 800 を据え置く)。
 const VOICE_MAX_TOKENS = 800;
+const LEGACY_WEB_RUNNER_ENABLED = process.env.WEB_LEGACY_SPECIALIST_RUNNER_ENABLED === "1";
 
 type ConversationTurn = { role: "user" | "assistant"; content: string };
+type SpecialistJobInput = {
+  query: string;
+  originalUserMessage: string;
+  yuiToolName: string;
+  conversationHistory?: ConversationTurn[];
+  yuiAckText?: string;
+};
 
 function requestsMutation(text: string): boolean {
   return /削除|消し|キャンセル|取消|取り消|作成|追加|登録|入れ|変更|更新|修正/.test(text);
@@ -109,30 +117,56 @@ export async function dispatchSpecialistJob(opts: {
       input: {
         query: opts.query,
         originalUserMessage: opts.originalUserMessage,
+        yuiToolName: opts.yuiToolName,
+        conversationHistory: opts.conversationHistory ?? [],
+        yuiAckText: opts.yuiAckText ?? "",
       },
     })
     .returning({ id: tasks.id });
 
   const jobId = row.id;
 
-  // 2. background で実行 (await しない)
-  void runJob({
-    jobId,
-    sessionId: opts.sessionId,
-    specialistId: spec.id,
-    yuiToolName: opts.yuiToolName,
-    query: opts.query,
-    originalUserMessage: opts.originalUserMessage,
-    conversationHistory: opts.conversationHistory ?? [],
-    yuiAckText: opts.yuiAckText ?? "",
-  }).catch((e) => {
-    console.error(`[job ${jobId}] uncaught:`, e);
-  });
+  // 通常は worker が tasks から claim して実行する。
+  // rollback 用に WEB_LEGACY_SPECIALIST_RUNNER_ENABLED=1 の時だけ従来の web 内実行へ戻す。
+  if (LEGACY_WEB_RUNNER_ENABLED) {
+    void runSpecialistJob({
+      jobId,
+      sessionId: opts.sessionId,
+      specialistId: spec.id,
+      yuiToolName: opts.yuiToolName,
+      query: opts.query,
+      originalUserMessage: opts.originalUserMessage,
+      conversationHistory: opts.conversationHistory ?? [],
+      yuiAckText: opts.yuiAckText ?? "",
+    }).catch((e) => {
+      console.error(`[job ${jobId}] uncaught:`, e);
+    });
+  }
 
   return { jobId, ok: true };
 }
 
-async function runJob(args: {
+export async function runSpecialistTask(row: Task): Promise<void> {
+  const input = row.input as SpecialistJobInput;
+  if (!row.sessionId) {
+    throw new Error(`specialist task ${row.id} has no session_id`);
+  }
+  if (!input?.yuiToolName || !input?.query || !input?.originalUserMessage) {
+    throw new Error(`specialist task ${row.id} has invalid input`);
+  }
+  return runSpecialistJob({
+    jobId: row.id,
+    sessionId: row.sessionId,
+    specialistId: row.agentName,
+    yuiToolName: input.yuiToolName,
+    query: input.query,
+    originalUserMessage: input.originalUserMessage,
+    conversationHistory: input.conversationHistory ?? [],
+    yuiAckText: input.yuiAckText ?? "",
+  });
+}
+
+export async function runSpecialistJob(args: {
   jobId: number;
   sessionId: string;
   specialistId: string;
@@ -164,11 +198,14 @@ async function runJobInner(args: {
       .set({ status: "running", startedAt: new Date() })
       .where(eq(tasks.id, jobId));
 
-    pushToSession(sessionId, {
+    await pushDurableToSession(sessionId, {
       type: "job_status",
       jobId,
       status: "running",
       specialistId,
+    }, {
+      dedupKey: `task:${jobId}:status:running`,
+      sourceJobId: String(jobId),
     });
 
     // 3. specialist 実行 (factual)
@@ -257,20 +294,26 @@ async function runJobInner(args: {
     });
 
     // 6. SSE push (会話メッセージ + ノートパネル更新)
-    pushToSession(sessionId, {
+    await pushDurableToSession(sessionId, {
       type: "job_status",
       jobId,
       status: "succeeded",
       specialistId,
+    }, {
+      dedupKey: `task:${jobId}:status:succeeded`,
+      sourceJobId: String(jobId),
     });
 
     if (!isPendingConfirmation) {
-      pushToSession(sessionId, {
+      await pushDurableToSession(sessionId, {
         type: "yui_message",
         jobId,
         text: yuiText,
         emotion,
         specialistId,
+      }, {
+        dedupKey: `task:${jobId}:voice`,
+        sourceJobId: String(jobId),
       });
     }
 
@@ -290,12 +333,15 @@ async function runJobInner(args: {
     }
 
     if (report) {
-      pushToSession(sessionId, {
+      await pushDurableToSession(sessionId, {
         type: "report_update",
         jobId,
         title: report.title,
         markdown: report.markdown,
         specialistId,
+      }, {
+        dedupKey: `task:${jobId}:report`,
+        sourceJobId: String(jobId),
       });
     }
 
@@ -322,12 +368,15 @@ async function runJobInner(args: {
       .where(eq(tasks.id, jobId));
 
     const errText = `申し訳ございません、${specialistLabel(specialistId)}の確認で少し詰まってしまいました…もう一度お試しいただけますか?`;
-    pushToSession(sessionId, {
+    await pushDurableToSession(sessionId, {
       type: "yui_message",
       jobId,
       text: errText,
       emotion: "sad",
       specialistId,
+    }, {
+      dedupKey: `task:${jobId}:failed`,
+      sourceJobId: String(jobId),
     });
     void writeAssistantMessage({
       sessionId,

@@ -6,8 +6,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { mailMessages } from "@/db/schema";
-import { isNull, inArray } from "drizzle-orm";
-import { curateMails } from "@/lib/mail-curate";
+import { isNull } from "drizzle-orm";
+import { enqueueBackgroundJob } from "@/lib/jobs/background";
 import { clientError } from "@/lib/api-error";
 
 export const dynamic = "force-dynamic";
@@ -32,9 +32,13 @@ export async function POST(req: NextRequest) {
     if (targetIds.length === 0) {
       return NextResponse.json({ ok: true, count: 0 });
     }
-    await curateMails(targetIds);
-    void inArray; // keep import used
-    return NextResponse.json({ ok: true, count: targetIds.length });
+    const job = await enqueueBackgroundJob({
+      jobType: "mail.curate",
+      payload: { ids: targetIds },
+      dedupKey: `mail.curate:${targetIds.slice().sort((a, b) => a - b).join(",")}`,
+      priority: 110,
+    });
+    return NextResponse.json({ ok: true, count: targetIds.length, jobId: job.id }, { status: 202 });
   } catch (e) {
     return clientError(req, e, { context: "mail/curate", message: "メールの再キュレーションに失敗しました" });
   }

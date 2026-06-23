@@ -20,6 +20,7 @@
     "dev": "next dev --webpack -H 0.0.0.0",
     "build": "next build --webpack",
     "start": "next start -H 0.0.0.0",
+    "worker": "tsx src/worker/index.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --incremental false",
     "check": "npm run typecheck && npm run lint && npm run eval:tools",
@@ -38,6 +39,7 @@
     "eval:tool-domains:strict": "tsx scripts/tool-domain-integration-eval.ts",
     "health:tools": "tsx scripts/tool-db-health-check.ts",
     "observe:tools": "tsx scripts/tool-observability-report.ts",
+    "observe:worker": "tsx scripts/worker-observability-report.ts",
     "reconcile:tools": "tsx scripts/tool-reconciliation-report.ts",
     "db:migrate": "tsx src/db/migrate.ts"
   },

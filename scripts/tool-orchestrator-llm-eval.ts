@@ -2,7 +2,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { sql } from "@/db/client";
 import { callLlm } from "@/lib/llm";
 import { cacheDel } from "@/lib/cache";
-import { buildExecutorContext, type ClientMessage } from "@/lib/chat/context-builder";
+import { buildToolContextBundle, type ClientMessage } from "@/lib/chat/context-builder";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import { runToolOrchestrator, type ToolOrchestratorResult } from "@/lib/chat/tool-orchestrator";
 import { createDispatchLedger } from "@/lib/tools/dispatch";
@@ -16,6 +16,7 @@ import { saveNote } from "@/lib/tools/note/save_note";
 import { gmailSearch } from "@/lib/tools/mail/gmail_search";
 import { musicNowPlaying } from "@/lib/tools/music/music_now_playing";
 import { searchContactsTool } from "@/lib/tools/contact/search_contacts";
+import { webSearch } from "@/lib/tools/web/web_search";
 import type { ToolContext, ToolDef } from "@/lib/tools/types";
 
 type Fixture = {
@@ -70,6 +71,7 @@ const registryTools = [
   cloneForEval(gmailSearch),
   cloneForEval(musicNowPlaying),
   cloneForEval(searchContactsTool),
+  cloneForEval(webSearch),
 ];
 
 const runtimeContext = [
@@ -214,6 +216,31 @@ const fixtures: Fixture[] = [
     expectedTool: "search_contacts",
     expectedState: "executed",
   },
+  {
+    name: "external verification resolves assistant claim",
+    messages: [
+      {
+        role: "assistant",
+        content:
+          "気になるニュースですが、ご主人様が気になっている「Palmier Pro」や「OCR 4」は、日本語に対応していますよ。",
+      },
+      { role: "user", content: "へえ、それはちゃんとWebで検索して確認した？" },
+    ],
+    expectedGate: "tool_required",
+    expectedTool: "web_search",
+    expectedState: "executed",
+    validate: (result) => {
+      const input = result.exec?.outcomes[0]?.input;
+      const errors: string[] = [];
+      if (!contains(input, /Palmier Pro|OCR 4|日本語対応/)) {
+        errors.push("web_search query should include assistant claim terms");
+      }
+      if (!result.debugLines.some((l) => /reference_claims: 1/.test(l))) {
+        errors.push("debug should expose reference_claims=1");
+      }
+      return errors;
+    },
+  },
 ];
 
 const completeExecutor = async ({ system, messages, tools }: {
@@ -239,7 +266,7 @@ async function runFixture(fixture: Fixture, index: number): Promise<boolean> {
   const sessionId = `tool-orchestrator-llm-eval-${Date.now()}-${index}`;
   const currentUserMsg = fixture.messages[fixture.messages.length - 1]?.content ?? "";
   const historyTimestamps = fixture.messages.map((_, i) => new Date(BASE_NOW.getTime() - (fixture.messages.length - i) * 60_000));
-  const { recentHistory, runtimeFacts } = buildExecutorContext({
+  const toolContext = buildToolContextBundle({
     messages: fixture.messages,
     currentUserMsg,
     historyTimestamps,
@@ -247,6 +274,7 @@ async function runFixture(fixture: Fixture, index: number): Promise<boolean> {
     source: "eval",
     now: BASE_NOW,
   });
+  const { executorHistory: recentHistory, runtimeFacts } = toolContext;
   const ctx: ToolContext = {
     sessionId,
     caller: { kind: "main" },
@@ -261,6 +289,9 @@ async function runFixture(fixture: Fixture, index: number): Promise<boolean> {
       currentUserMsg,
       messages: fixture.messages,
       recentHistory,
+      gateHistory: toolContext.gateHistory,
+      retrievalQuery: toolContext.retrievalQuery,
+      referenceClaims: toolContext.referenceClaims,
       runtimeFacts: `${runtimeContext}\n${runtimeFacts}`,
       envBlock: runtimeContext,
       registryTools,

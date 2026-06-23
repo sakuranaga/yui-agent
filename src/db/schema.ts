@@ -180,6 +180,62 @@ export const tasks = pgTable(
   ]
 );
 
+export const toolConfirmJobs = pgTable(
+  "tool_confirm_jobs",
+  {
+    token: text("token").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    status: text("status")
+      .notNull()
+      .default("pending")
+      .$type<"pending" | "confirmed" | "denied" | "running" | "executed" | "failed">(),
+    pending: jsonb("pending").notNull(),
+    result: jsonb("result"),
+    failReason: text("fail_reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_tool_confirm_jobs_status_created").on(t.status, t.createdAt),
+    index("idx_tool_confirm_jobs_session_status").on(t.sessionId, t.status),
+  ]
+);
+
+export const backgroundJobs = pgTable(
+  "background_jobs",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    jobType: text("job_type").notNull(),
+    status: text("status")
+      .notNull()
+      .default("pending")
+      .$type<"pending" | "running" | "succeeded" | "failed" | "cancelled">(),
+    payload: jsonb("payload").notNull(),
+    dedupKey: text("dedup_key"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    priority: integer("priority").notNull().default(100),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    lockedBy: text("locked_by"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_background_jobs_claim").on(t.status, t.availableAt, t.priority, t.createdAt),
+    index("idx_background_jobs_type_status").on(t.jobType, t.status),
+  ]
+);
+
 /**
  * Phase G以降: cron loop の last-check state 永続化。
  */
@@ -190,6 +246,63 @@ export const proactiveState = pgTable("proactive_state", {
     .notNull()
     .defaultNow(),
 });
+
+export const proactiveSpeechQueue = pgTable(
+  "proactive_speech_queue",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    sessionId: text("session_id").notNull(),
+    source: text("source").notNull().$type<"cron_prompt" | "timer_prompt" | "notification_speak">(),
+    prompt: text("prompt"),
+    speakText: text("speak_text"),
+    emotion: text("emotion"),
+    priority: integer("priority").notNull().default(100),
+    metadata: jsonb("metadata").notNull().default({}).$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_proactive_speech_queue_ready").on(
+      t.sessionId,
+      t.deliveredAt,
+      t.availableAt,
+      t.priority,
+      t.createdAt,
+    ),
+  ]
+);
+export type ProactiveSpeechQueueRow = typeof proactiveSpeechQueue.$inferSelect;
+export type NewProactiveSpeechQueueRow = typeof proactiveSpeechQueue.$inferInsert;
+
+export const eventsOutbox = pgTable(
+  "events_outbox",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    sessionId: text("session_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+    dedupKey: text("dedup_key"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    priority: integer("priority").notNull().default(100),
+    sourceJobId: text("source_job_id"),
+  },
+  (t) => [
+    index("idx_events_outbox_ready").on(
+      t.sessionId,
+      t.deliveredAt,
+      t.availableAt,
+      t.priority,
+      t.createdAt,
+    ),
+  ]
+);
+export type EventsOutboxRow = typeof eventsOutbox.$inferSelect;
+export type NewEventsOutboxRow = typeof eventsOutbox.$inferInsert;
 
 /**
  * Phase 3 (前倒し): rolling extraction の進捗追跡。
@@ -495,6 +608,10 @@ export type MemoryChunk = typeof memoryChunks.$inferSelect;
 export type NewMemoryChunk = typeof memoryChunks.$inferInsert;
 export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
+export type ToolConfirmJob = typeof toolConfirmJobs.$inferSelect;
+export type NewToolConfirmJob = typeof toolConfirmJobs.$inferInsert;
+export type BackgroundJob = typeof backgroundJobs.$inferSelect;
+export type NewBackgroundJob = typeof backgroundJobs.$inferInsert;
 export type GoogleOauthToken = typeof googleOauthTokens.$inferSelect;
 export type NewGoogleOauthToken = typeof googleOauthTokens.$inferInsert;
 export type Timer = typeof timers.$inferSelect;
@@ -1442,3 +1559,19 @@ export const toolExecutionLog = pgTable("tool_execution_log", {
 });
 export type ToolExecutionLogRow = typeof toolExecutionLog.$inferSelect;
 export type NewToolExecutionLogRow = typeof toolExecutionLog.$inferInsert;
+
+export const workerHeartbeats = pgTable(
+  "worker_heartbeats",
+  {
+    workerId: text("worker_id").primaryKey(),
+    role: text("role").notNull(),
+    hostname: text("hostname"),
+    pid: integer("pid"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    metadata: jsonb("metadata").notNull().default({}).$type<Record<string, unknown>>(),
+  },
+  (t) => [index("idx_worker_heartbeats_role_seen").on(t.role, t.lastSeenAt.desc())]
+);
+export type WorkerHeartbeat = typeof workerHeartbeats.$inferSelect;
+export type NewWorkerHeartbeat = typeof workerHeartbeats.$inferInsert;

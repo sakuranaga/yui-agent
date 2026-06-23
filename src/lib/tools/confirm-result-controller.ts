@@ -4,7 +4,7 @@ import { loadPersona } from "@/lib/persona";
 import { callLlm } from "@/lib/llm";
 import { sanitizeAssistantText } from "@/lib/response-sanitizer";
 import { classifyEmotion } from "@/lib/emotion";
-import { pushToSession } from "@/lib/jobs/events";
+import { pushDurableToSession } from "@/lib/jobs/outbox";
 import { getEffectiveState } from "@/lib/activity";
 import { appendOverlay } from "@/lib/conversation-overlay";
 import { writeAssistantMessage } from "@/lib/memory";
@@ -255,12 +255,15 @@ export async function emitConfirmResult(input: ConfirmResultControllerInput): Pr
     emotion,
   });
 
-  pushToSession(input.sessionId, {
+  await pushDurableToSession(input.sessionId, {
     type: "yui_message",
     jobId: -1,
     text: reply,
     emotion,
     specialistId: undefined,
+  }, {
+    dedupKey: `tool-confirm:${input.token}:final-voice`,
+    sourceJobId: input.token,
   });
 
   if ((await getEffectiveState(input.sessionId)) === "private") {

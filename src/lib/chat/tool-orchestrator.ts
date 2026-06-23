@@ -8,13 +8,14 @@ import { resolveEntry } from "@/lib/llm";
 import {
   runExecutor,
   type ExecutorComplete,
+  type ExecutorOutcome,
   type ExecutorRunResult,
 } from "@/lib/tools/executor";
 import { retrieveToolCandidates, isActionIntent } from "@/lib/tools/tool-index";
 import { decideToolGate, type ToolGateDecision } from "@/lib/tools/gate";
-import type { DispatchLedger, DispatchOutcome } from "@/lib/tools/dispatch";
+import { dispatchTool, type DispatchLedger, type DispatchOutcome } from "@/lib/tools/dispatch";
 import type { ToolContext, ToolDef } from "@/lib/tools/types";
-import type { ClientMessage } from "@/lib/chat/context-builder";
+import type { ClientMessage, ReferenceClaim } from "@/lib/chat/context-builder";
 
 type ConfirmedCalendarEventRef = {
   id: string;
@@ -111,6 +112,70 @@ function shouldUseCurrentOnlyForExecutor(
   return hasMutationVerb && hasTimeOrDate;
 }
 
+function isReferenceClaimMessage(m: Anthropic.MessageParam): boolean {
+  return typeof m.content === "string" && m.content.startsWith("# 検証対象の直近Assistant発話");
+}
+
+function externalVerificationExplicit(text: string): boolean {
+  return /(Web|WEB|web|検索|ググ|調べ|確認して|確認した|ソース|出典|裏(?:を|取り)|本当)/u.test(text);
+}
+
+function buildFallbackSearchQuery(args: {
+  currentUserMsg: string;
+  retrievalQuery: string;
+  referenceClaims: ReferenceClaim[];
+}): string {
+  const q = args.retrievalQuery.trim();
+  if (q && q !== args.currentUserMsg.trim()) return q;
+  const claimText = args.referenceClaims.map((c) => c.text).join(" ");
+  const terms = Array.from(
+    new Set(
+      [
+        ...claimText.matchAll(/[「『"']([^」』"']{2,80})[」』"']/g),
+      ].map((m) => m[1])
+    )
+  );
+  const asciiTerms = Array.from(
+    new Set(claimText.match(/[A-Za-z][A-Za-z0-9._+-]*(?:\s+[A-Za-z0-9][A-Za-z0-9._+-]*){0,4}/g) ?? [])
+  );
+  const keyTerms = Array.from(
+    new Set(claimText.match(/日本語対応|多言語対応|対応言語|OCR|API|SDK|価格|リリース|公開日|仕様|バージョン/g) ?? [])
+  );
+  const parts = [...terms, ...asciiTerms, ...keyTerms, args.currentUserMsg].filter((p) => p.trim().length > 0);
+  return parts.join(" ").slice(0, 300).trim();
+}
+
+async function runExternalVerificationBackstop(args: {
+  query: string;
+  tools: ToolDef[];
+  ctx: ToolContext;
+  ledger: DispatchLedger;
+  debugLines: string[];
+}): Promise<ExecutorOutcome | null> {
+  const query = args.query.trim();
+  if (!query) {
+    args.debugLines.push("- external backstop: query empty → skipped");
+    return null;
+  }
+  const webSearch = args.tools.find((t) => t.name === "web_search");
+  if (!webSearch) {
+    args.debugLines.push("- external backstop: web_search unavailable");
+    return null;
+  }
+  args.debugLines.push(`- external backstop: web_search query="${query.slice(0, 80)}"`);
+  if (process.env.NODE_ENV !== "production") {
+    console.log(`[external-backstop] web_search query="${query.slice(0, 120)}"`);
+  }
+  const input = { query, limit: 8 };
+  const outcome = await dispatchTool(
+    webSearch,
+    { id: `external_backstop_${Date.now()}`, input },
+    args.ctx,
+    args.ledger,
+  );
+  return { toolName: webSearch.name, input, outcome };
+}
+
 export type ToolOrchestratorResult = {
   gateDecision: ToolGateDecision;
   runExec: boolean;
@@ -124,6 +189,9 @@ export async function runToolOrchestrator(args: {
   currentUserMsg: string;
   messages: ClientMessage[];
   recentHistory: Anthropic.MessageParam[];
+  gateHistory: Anthropic.MessageParam[];
+  retrievalQuery: string;
+  referenceClaims: ReferenceClaim[];
   runtimeFacts: string;
   envBlock: string;
   registryTools: ToolDef[];
@@ -147,7 +215,7 @@ export async function runToolOrchestrator(args: {
   if (canRunExec && args.isUserTurn) {
     gateDecision = await decideToolGate({
       currentUserMsg: args.currentUserMsg,
-      recentHistory: args.recentHistory,
+      recentHistory: args.gateHistory,
       runtimeFacts: args.runtimeFacts,
     });
   }
@@ -170,7 +238,7 @@ export async function runToolOrchestrator(args: {
   if (args.registryTools.length > 0) {
     try {
       const retrieval = await retrieveToolCandidates({
-        query: args.currentUserMsg,
+        query: args.retrievalQuery,
         permitted: args.registryTools,
       });
       if (retrieval.mode !== "full-catalog") {
@@ -179,9 +247,12 @@ export async function runToolOrchestrator(args: {
         if (filtered.length > 0) executorTools = filtered;
       }
       debugLines.push(`- retrieval: ${retrieval.mode} ${args.registryTools.length}→${executorTools.length}`);
+      if (args.retrievalQuery !== args.currentUserMsg) {
+        debugLines.push(`- retrieval_query: ${args.retrievalQuery.slice(0, 120)}`);
+      }
       if (process.env.NODE_ENV !== "production") {
         console.log(
-          `[tool-retrieval] mode=${retrieval.mode} ${args.registryTools.length}→${executorTools.length} q="${args.currentUserMsg.slice(0, 30)}"`,
+          `[tool-retrieval] mode=${retrieval.mode} ${args.registryTools.length}→${executorTools.length} q="${args.retrievalQuery.slice(0, 80)}"`,
         );
       }
     } catch (e) {
@@ -192,12 +263,19 @@ export async function runToolOrchestrator(args: {
   const execEntry = await resolveEntry("executor").catch(() => null);
   const singlePass = /xlam|functionary|gorilla/i.test(execEntry?.entry.modelId ?? "");
   const currentOnly = shouldUseCurrentOnlyForExecutor(gateDecision, args.currentUserMsg);
+  const referenceClaimsAllowed = gateDecision.category === "read" || gateDecision.category === "external";
+  const baseExecutorHistory = referenceClaimsAllowed
+    ? args.recentHistory
+    : args.recentHistory.filter((m) => !isReferenceClaimMessage(m));
   const execHistory =
     singlePass || currentOnly
       ? [{ role: "user" as const, content: args.currentUserMsg }]
-      : args.recentHistory;
+      : baseExecutorHistory;
   if (currentOnly) {
     debugLines.push("- executor history: self-contained mutation のため最新発話のみ");
+  }
+  if (args.referenceClaims.length > 0) {
+    debugLines.push(`- reference_claims: ${args.referenceClaims.length} (${referenceClaimsAllowed ? "executor" : "gate-only"})`);
   }
 
   const runOnce = (tools: ToolDef[]) =>
@@ -303,6 +381,31 @@ export async function runToolOrchestrator(args: {
       console.log("[tool-retrieval] no_tool_calls + action-intent → full catalog 再試行");
     }
     exec = await runOnce(args.registryTools);
+  }
+
+  const needsExternalBackstop =
+    (gateDecision.category === "external" || externalVerificationExplicit(args.currentUserMsg)) &&
+    exec.outcomes.length === 0 &&
+    (exec.stopReason === "declined" || exec.stopReason === "no_tool_calls");
+  if (needsExternalBackstop) {
+    const fallback = await runExternalVerificationBackstop({
+      query: buildFallbackSearchQuery({
+        currentUserMsg: args.currentUserMsg,
+        retrievalQuery: args.retrievalQuery,
+        referenceClaims: args.referenceClaims,
+      }),
+      tools: args.registryTools,
+      ctx: args.mainCtx,
+      ledger: args.dispatchLedger,
+      debugLines,
+    });
+    if (fallback) {
+      exec = {
+        ...exec,
+        outcomes: [fallback],
+        stopReason: "single_pass",
+      };
+    }
   }
 
   return { gateDecision, runExec, exec, debugLines, pendingJobs };

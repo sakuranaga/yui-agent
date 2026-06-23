@@ -11,7 +11,7 @@
 import { db } from "@/db/client";
 import { notifications, type Notification, type NewNotification } from "@/db/schema";
 import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
-import { pushToSession } from "@/lib/jobs/events";
+import { pushDurableToSession } from "@/lib/jobs/outbox";
 import { getEffectiveState, type UserState } from "@/lib/activity";
 import { getRule, type EventKind, type Importance } from "@/lib/notification-settings";
 
@@ -166,7 +166,9 @@ export async function dispatchNotification(
       forwardToDiscord,
     };
     if (toast) {
-      pushToSession(input.sessionId, eventPayload);
+      await pushDurableToSession(input.sessionId, eventPayload, {
+        dedupKey: `notification:${row.id}:toast`,
+      });
       result.toastFired = true;
     }
 
@@ -178,35 +180,55 @@ export async function dispatchNotification(
           : input.preview
             ? `${input.title}。${input.preview}`
             : input.title;
-      pushToSession(input.sessionId, {
-        type: "yui_message",
-        jobId: Date.now(),
-        text,
-        emotion: "neutral",
-      });
-      result.speakFired = true;
-      // overlay tee: リロード生存させるため Valkey overlay にも書く (= raw_messages に
-      // 書かれない / プライベートモード時の発話との区別のため kind=ephemeral)
-      void (async () => {
-        try {
-          const { appendOverlay } = await import("@/lib/conversation-overlay");
-          await appendOverlay(input.sessionId, {
-            role: "assistant",
-            content: text,
-            kind: "ephemeral",
-            source: "notification",
-          });
-        } catch (e) {
-          console.warn("[notifications] overlay tee failed:", e);
+      try {
+        const { maybeQueueNotificationSpeak } = await import("@/lib/proactive-turn");
+        const queued = await maybeQueueNotificationSpeak({
+          sessionId: input.sessionId,
+          text,
+          emotion: "neutral",
+          metadata: { notificationId: Number(row.id), kind: row.kind },
+        });
+        if (queued) {
+          speak = false;
         }
-      })();
+      } catch (e) {
+        console.warn("[notifications] proactive speak queue check failed:", e);
+      }
+      if (speak) {
+        await pushDurableToSession(input.sessionId, {
+          type: "yui_message",
+          jobId: Date.now(),
+          text,
+          emotion: "neutral",
+        }, {
+          dedupKey: `notification:${row.id}:speak`,
+        });
+        result.speakFired = true;
+        // overlay tee: リロード生存させるため Valkey overlay にも書く (= raw_messages に
+        // 書かれない / プライベートモード時の発話との区別のため kind=ephemeral)
+        void (async () => {
+          try {
+            const { appendOverlay } = await import("@/lib/conversation-overlay");
+            await appendOverlay(input.sessionId, {
+              role: "assistant",
+              content: text,
+              kind: "ephemeral",
+              source: "notification",
+            });
+          } catch (e) {
+            console.warn("[notifications] overlay tee failed:", e);
+          }
+        })();
+      }
     }
 
     // Step 7: Discord 転送 (= 別 session に push)
     if (forwardToDiscord) {
       const botSid = process.env.DISCORD_SESSION_ID;
       if (botSid && botSid !== input.sessionId) {
-        pushToSession(botSid, eventPayload);
+        await pushDurableToSession(botSid, eventPayload, {
+          dedupKey: `notification:${row.id}:discord:${botSid}`,
+        });
         result.discordForwarded = true;
       }
     }

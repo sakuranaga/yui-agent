@@ -9,8 +9,8 @@ import {
   ROLLING_THRESHOLD,
 } from "@/lib/extract";
 import { reconcileNewChunks } from "@/lib/reconcile";
-import { summarizeUserImageBg } from "@/lib/image-summary";
 import type { ClientImage } from "@/lib/chat/context-builder";
+import { enqueueBackgroundJob } from "@/lib/jobs/background";
 
 export type ChatSource = "web" | "discord_text" | "discord_voice" | "cron" | "timer";
 
@@ -36,12 +36,21 @@ export async function saveUserImages(args: {
     }
   }
 
-  void summarizeUserImageBg({
-    sessionId: args.sessionId,
-    images: args.images,
-    userText: args.userText,
-    assistantReply: args.assistantReply,
-  });
+  try {
+    await enqueueBackgroundJob({
+      jobType: "image.summary",
+      payload: {
+        sessionId: args.sessionId,
+        images: args.images,
+        userText: args.userText,
+        assistantReply: args.assistantReply,
+      },
+      dedupKey: `image.summary:${args.sessionId}:${Date.now()}`,
+      priority: 120,
+    });
+  } catch (e) {
+    console.warn("[chat] image summary enqueue failed:", e);
+  }
 
   return savedAttachments;
 }
@@ -103,7 +112,24 @@ export async function persistChatTurn(args: {
   return { isPrivate };
 }
 
-export async function runPostPersistJobs(args: {
+export async function enqueuePostPersistJobs(args: {
+  sessionId: string;
+  currentUserMsg: string;
+  isPrivate: boolean;
+}): Promise<void> {
+  if (args.isPrivate) return;
+  await enqueueBackgroundJob({
+    jobType: "chat.post_persist",
+    payload: {
+      sessionId: args.sessionId,
+      currentUserMsg: args.currentUserMsg,
+    },
+    dedupKey: `chat.post_persist:${args.sessionId}:${Date.now()}`,
+    priority: 100,
+  });
+}
+
+export async function runPostPersistJobsNow(args: {
   sessionId: string;
   currentUserMsg: string;
   isPrivate: boolean;

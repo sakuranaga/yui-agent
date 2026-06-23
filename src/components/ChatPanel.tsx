@@ -280,6 +280,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
   // 古い世代の speak ループは generationRef と比較して自分が陳腐化したら自主中断。
   const speakGenerationRef = useRef(0);
   const onBotResponseRef = useRef(onBotResponse);
+  const seenSseMessageKeysRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     onBotResponseRef.current = onBotResponse;
   }, [onBotResponse]);
@@ -315,6 +316,20 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
           textLen: data.text.length,
           textPreview: data.text.slice(0, 60),
         });
+        const now = Date.now();
+        const eventKey = `${data.jobId}:${data.text}`;
+        const seen = seenSseMessageKeysRef.current;
+        for (const [key, ts] of seen) {
+          if (now - ts > 5 * 60 * 1000) seen.delete(key);
+        }
+        if (seen.has(eventKey)) {
+          ttsLog("yui_message duplicate skipped", {
+            jobId: data.jobId,
+            textPreview: data.text.slice(0, 60),
+          });
+          return;
+        }
+        seen.set(eventKey, now);
         onBotResponseRef.current(data.text, data.emotion ?? "neutral");
         // 同期で state 追加 → 非同期で TTS (race 防止)
         // SSE 経由の yui_message はニュース紹介 / 音楽紹介 / 通知などで、

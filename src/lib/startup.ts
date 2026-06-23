@@ -9,7 +9,6 @@
 import { processStaleSessions } from "@/lib/extract";
 import { reconcileNewChunks } from "@/lib/reconcile";
 import { rearmAllPending } from "@/lib/timers";
-import { startScheduler } from "@/lib/scheduler";
 import { pruneExpiredAttachments } from "@/lib/chat-attachments";
 import { pruneOldNews } from "@/lib/news";
 import { loadLocationFromDb } from "@/lib/location";
@@ -26,6 +25,10 @@ let lastStaleCheckAt = 0;
  * リクエスト hot path から fire-and-forget で呼ぶ。
  */
 export function tickMaintenance(): void {
+  if (process.env.WEB_LEGACY_MAINTENANCE_ENABLED !== "1") {
+    return;
+  }
+
   const now = Date.now();
   if (initialized && now - lastStaleCheckAt < STARTUP_CHECK_INTERVAL_MS) {
     return;
@@ -53,10 +56,14 @@ export function tickMaintenance(): void {
         } catch (e) {
           console.warn("[startup] rearmAllPending failed:", e);
         }
-        try {
-          startScheduler();
-        } catch (e) {
-          console.warn("[startup] startScheduler failed:", e);
+        if (process.env.WEB_LEGACY_SCHEDULER_ENABLED === "1") {
+          try {
+            const { startScheduler } = await import("@/lib/scheduler");
+            console.warn("[startup] WEB_LEGACY_SCHEDULER_ENABLED=1; starting scheduler in web");
+            startScheduler();
+          } catch (e) {
+            console.warn("[startup] legacy startScheduler failed:", e);
+          }
         }
         // Spotify now-playing は SDK push (player_state_changed → /api/spotify/poll-now) と
         // ENV ブロック生成時の on-demand poll で更新する (定期 polling 撤去済)。

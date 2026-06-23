@@ -24,6 +24,8 @@ import {
 import { clientError } from "@/lib/api-error";
 
 export const dynamic = "force-dynamic";
+const LEGACY_WEB_CONFIRM_EXECUTION_ENABLED =
+  process.env.WEB_LEGACY_CONFIRM_EXECUTION_ENABLED === "1";
 
 export async function POST(
   req: NextRequest,
@@ -73,8 +75,9 @@ export async function POST(
       return NextResponse.json({ error: "token vanished mid-flight" }, { status: 410 });
     }
 
-    // confirmed → background で executePendingTool 起動 (= fire-and-forget)
-    if (decision === "confirmed") {
+    // confirmed は通常 worker が tool_confirm_jobs から claim して実行する。
+    // rollback 時だけ旧 Web 内 fire-and-forget を復帰する。
+    if (decision === "confirmed" && LEGACY_WEB_CONFIRM_EXECUTION_ENABLED) {
       void executePendingTool(token).catch((e) => {
         console.warn(`[tool-confirm/${token}] executePendingTool failed:`, e);
       });
