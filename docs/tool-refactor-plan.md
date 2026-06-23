@@ -118,7 +118,7 @@
 ### Phase R4: System Prompt Builder の分離
 
 ステータス: 完了
-コミット: `TBD システムプロンプト構築を分離`
+コミット: `ed103a8 システムプロンプト構築を分離`
 
 目的:
 `route.ts` に残る persona / guard / user profile / health goals / timer guard の system block 構築を `src/lib/chat/system-prompt-builder.ts` に移す。
@@ -157,7 +157,7 @@ async function buildChatSystemPrompt(args: {
 ### Phase R5: Memory Retrieval Builder の分離
 
 ステータス: 完了
-コミット: `TBD メモリ検索文脈の構築を分離`
+コミット: `bbd33c3 メモリ検索文脈の構築を分離`
 
 目的:
 L2/L3/L4 memory retrieval と `memorySection` 構築を `src/lib/chat/memory-context.ts` に移す。
@@ -208,7 +208,7 @@ Tool Gate / tool retrieval / Executor / specialist bridge の外枠を `src/lib/
 #### Phase R6a: Gate + Retrieval + Executor Runner の分離
 
 ステータス: 完了
-コミット: `TBD ツール実行オーケストレーターを分離`
+コミット: `8f973d0 ツール実行オーケストレーターを分離`
 
 内容:
 - Tool Gate 判定
@@ -254,7 +254,7 @@ type ToolOrchestratorResult = {
 #### Phase R6b: Specialist Bridge の分離
 
 ステータス: 完了
-コミット: `TBD Specialist Bridge をオーケストレーターへ統合`
+コミット: `a73a12c Specialist Bridgeをオーケストレーターへ統合`
 
 内容:
 - `ask_schedule_specialist` の recent target delete 解決
@@ -292,7 +292,7 @@ HTTP request parsing と chat turn orchestration を分ける。
 #### Phase R7a: Request Parser の分離
 
 ステータス: 完了
-コミット: `TBD チャットリクエスト解析を分離`
+コミット: `3d906a0 チャットリクエスト解析を分離`
 
 役割:
 - `request-parser.ts`: body validation / source / timerEvent / message normalization
@@ -313,7 +313,7 @@ HTTP request parsing と chat turn orchestration を分ける。
 ### Phase R8: Dead Import / Legacy Tool Cleanup
 
 ステータス: 完了
-コミット: `TBD チャットルートの未使用importを整理`
+コミット: `aaa04d3 チャットルートの未使用importを整理`
 
 目的:
 `route.ts` に残る旧 inline tool 時代の未使用 import を整理する。
