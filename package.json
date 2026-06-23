@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit --incremental false",
     "eval:tools": "tsx scripts/tool-runtime-eval.ts",
     "eval:gate-llm": "tsx scripts/tool-gate-llm-eval.ts",
+    "eval:executor-llm": "tsx scripts/tool-executor-llm-eval.ts",
     "eval:dedup-embed": "tsx scripts/tool-dedup-embedding-eval.ts",
     "eval:tool-db": "tsx scripts/tool-db-integration-eval.ts",
     "eval:tool-reconcile": "tsx scripts/tool-reconciliation-eval.ts",

@@ -699,6 +699,38 @@ R15 の pure fixture では見えていなかった「文字違いの同一意�
 - `eval:dedup-embed` が Docker 内で通る
 - typecheck / lint / 既存 `eval:tools` が通る
 
+### Phase R22: Executor LLM Tool Selection Eval
+
+ステータス: 実装完了
+
+目的:
+実 LLM の Executor が、ユーザー発話と短い履歴から期待ツールを選び、最低限必要な引数を生成できるかを回帰テストする。
+R18 の handler CRUD では見えない「モデル依存のツール選択・引数生成」の退行を検出する。
+
+実装予定:
+- `scripts/tool-executor-llm-eval.ts`
+- `npm run eval:executor-llm`
+
+対象:
+- 予定作成: `gcal_create_event` と summary/start/end
+- 予定削除: `gcal_delete_event` と event_id
+- リマインダー作成: `add_reminder` と title/base_at
+- TODO作成: `add_todo` と title
+- メモ保存: `save_note` と body_md
+- 履歴参照つき予定作成: 会話履歴から title/location/start を補う
+
+方針:
+- 実 LLM / 実 `runExecutor` を使う
+- 実 tool handler は呼ばず、ToolDef の name / description / schema を保った mock handler に差し替える
+- GCal / DB / 外部API への副作用は発生させない
+- ローカルLLM差を考慮し、初期しきい値は 5/6 pass とする
+- 各 fixture で実際の tool name / input を表示し、失敗時にプロンプトやdescription改善へつなげる
+
+完了条件:
+- `eval:executor-llm` が Docker 内で実行できる
+- 期待ツールと必須引数の pass/fail が表示される
+- typecheck / lint / 既存 `eval:tools` が通る
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
