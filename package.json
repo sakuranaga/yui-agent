@@ -1,6 +1,6 @@
 {
   "name": "yui-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "3D アバターが声と表情で応答する、個人ホスト向け AI 秘書 (Yui Agent)",
   "license": "SEE LICENSE IN LICENSE",
