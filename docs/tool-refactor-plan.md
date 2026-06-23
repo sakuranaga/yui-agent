@@ -385,7 +385,7 @@ docker compose logs --since 1m web
 ### Phase R10: Tool Runtime Auto Eval
 
 ステータス: 初期導入完了
-コミット: `TBD ツール実行の自動evalを追加`
+コミット: `b5937fd ツール実行の自動evalを追加`
 
 目的:
 手動回帰だけに依存せず、ツール実行基盤の決定的なロジックを固定 fixture で検証する。
