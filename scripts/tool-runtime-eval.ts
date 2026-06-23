@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { parseChatRequest } from "@/lib/chat/request-parser";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import { briefToolInput } from "@/lib/chat/tool-summary";
+import { normalizeAnchorDateTime } from "@/lib/tools/dedup-guard";
 import type { ExecutorOutcome } from "@/lib/tools/executor";
 import type { UnifiedToolOutcome } from "@/lib/tools/outcome";
 
@@ -216,6 +217,22 @@ test("tool summary formats high-signal mutation inputs", () => {
     }),
     "query=明日の13時にランチの予定を入れて",
   );
+});
+
+test("dedup anchor keeps all-day dates stable", () => {
+  assert.equal(normalizeAnchorDateTime("2026-06-24"), "2026-06-24");
+});
+
+test("dedup anchor normalizes dateTime to UTC minute", () => {
+  assert.equal(
+    normalizeAnchorDateTime("2026-06-24T13:00:30+09:00"),
+    "2026-06-24T04:00",
+  );
+});
+
+test("dedup anchor rejects invalid dateTime", () => {
+  assert.equal(normalizeAnchorDateTime("明日の13時"), null);
+  assert.equal(normalizeAnchorDateTime(undefined), null);
 });
 
 let passed = 0;

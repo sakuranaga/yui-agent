@@ -410,6 +410,10 @@ docker compose logs --since 1m web
   - dedup skip final outcome
 - tool summary
   - reminder / specialist query の要約
+- dedup
+  - 終日 date anchor
+  - dateTime の UTC 分単位正規化
+  - invalid dateTime の拒否
 
 次の拡張:
 - Gate fixture eval
