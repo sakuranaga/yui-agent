@@ -813,6 +813,35 @@ R22 の最小 Executor LLM eval を拡張し、read 系、曖昧 mutation の抑
 - 副作用なしの mock handler 方針を維持する
 - typecheck / lint / `check:tool-model` が通る
 
+### Phase R26: Tool Orchestrator End-to-End LLM Eval
+
+ステータス: 実装完了
+
+目的:
+`Gate -> tool retrieval -> Executor -> dispatch/confirm state -> response planner` のチャット1ターン経路を、外部 API 副作用なしで結合検証する。
+R25 は Executor 単体の選択精度を見たが、実際の本番経路では Gate / retrieval / confirm state / finalDirectOutcomes 判定が絡むため、この境界での退行を検出する。
+
+実装予定:
+- `scripts/tool-orchestrator-llm-eval.ts`
+- `npm run eval:tool-orchestrator-llm`
+- `check:tool-model` に追加
+- 外部 API handler は mock し、予定作成/削除は confirm pending 入口まで通す
+
+検証対象:
+- 雑談はツール経路に入らない
+- 予定 read は `gcal_list_events`
+- 予定作成は `pending_confirmation` になり、完了報告候補にならない
+- event_id なし削除は `gcal_delete_event` を直接呼ばず検索に回る
+- event_id あり削除は `pending_confirmation`
+- 曖昧な予定作成は実行しない
+- 会話履歴参照の予定作成が文脈を維持する
+- reminder / TODO / Gmail / music / contact の主要経路が正しい
+
+完了条件:
+- `eval:tool-orchestrator-llm` が Docker 内で通る
+- typecheck / lint / `check:tool-model` が通る
+- 既存 `check` が通る
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
