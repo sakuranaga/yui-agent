@@ -54,6 +54,12 @@ services:
       # Spotify は 2025 以降 loopback の自己署名 HTTPS を "Insecure" として拒否するため、
       # 既定は http://127.0.0.1:3000 (loopback HTTP = Spotify policy で許可される唯一の経路)
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:3000/api/spotify/callback}
+      # Google OAuth (Calendar / Gmail)。token 自体は DB に暗号化保存するが、
+      # refresh には OAuth client 設定が必要。
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
       # safeFetch の private 範囲 allowlist (= 内部 Tailnet / 自宅 LAN の信頼ホスト)
       - SAFE_FETCH_ALLOWED_HOSTS=${SAFE_FETCH_ALLOWED_HOSTS:-}
       # TTS / Embedding サーバの URL は user の環境に依存するので、デフォルトは空または
