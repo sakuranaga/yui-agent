@@ -842,6 +842,75 @@ R25 は Executor 単体の選択精度を見たが、実際の本番経路では
 - typecheck / lint / `check:tool-model` が通る
 - 既存 `check` が通る
 
+### Phase R27: Confirm Phase B E2E Eval
+
+ステータス: 実装完了
+
+目的:
+確認ダイアログ表示後の Phase B (`applyConfirmDecision -> executePendingTool -> confirmFinal`) を、外部 API 副作用なしで検証する。
+R26 は confirm pending 入口までの検証であり、R27 では承認/拒否後の状態遷移、handler 実行回数、DB final state を固定する。
+
+実装予定:
+- `scripts/tool-confirm-phaseb-eval.ts`
+- `npm run eval:tool-confirm-phaseb`
+- `check:tool-integration` / `check:tool-integration:strict` に追加
+- registry 上の対象 tool handler を eval 中だけ mock し、外部 API は呼ばない
+- confirm final voice は冪等キーで抑制し、LLM 完了報告生成に依存しない
+
+検証対象:
+- approve: pending が confirmed になり、handler が1回だけ実行される
+- approve: `tool_execution_log.status` が `executed` になる
+- approve: `tasks.output.confirmFinal` が `completed/success=true/resultあり` になる
+- deny: handler は実行されない
+- deny: `tool_execution_log.status` が `cancelled` になる
+- deny: `tasks.output.confirmFinal` が `cancelled/success=false/reason=user denied` になる
+- どちらの経路でも session pending index が空になる
+
+完了条件:
+- `eval:tool-confirm-phaseb` が Docker 内で通る
+- typecheck / lint / `check` が通る
+
+### Phase R28: Specialist Bridge Runtime Eval
+
+ステータス: 実装完了
+
+目的:
+Executor の `extraTools` / `onExtraTool` 経路を決定的 eval で固定し、specialist/background job bridge の退行を検出する。
+実 background job や specialist LLM までは走らせず、Executor から bridge へ渡る契約と状態分類を検証する。
+
+実装内容:
+- `scripts/tool-runtime-eval.ts` に async test runner を導入
+- `ask_schedule_specialist` 相当の extra tool fixture を追加
+- `eval:tools` の決定的ゲートに含める
+
+検証対象:
+- extra tool が `executed/silent` を返したら `async_dispatched` で止まる
+- judge skip 相当は `skipped/report` として可視化され、完了扱いにならない
+- 同一 turn で同一 extra tool / input が重複しても dispatch は1回だけ
+
+完了条件:
+- `eval:tools` が Docker 内で通る
+- typecheck / lint / `check` が通る
+
+### Phase R29: Final Implementation Report
+
+ステータス: 実装完了
+
+目的:
+ツール利用リファクタリング後の最終アーキテクチャ、実行シーケンス、eval体系、残リスクを1つの実装レポートにまとめる。
+
+成果物:
+- `docs/tool-use-implementation-report.md`
+- モジュール関係の Mermaid 図
+- 通常ツール実行の Mermaid sequence
+- Confirm Phase A/B の Mermaid sequence
+- Specialist bridge の Mermaid sequence
+- Eval / regression 一覧
+
+完了条件:
+- レポートが現行実装のモジュール名・script名と一致している
+- 残リスクが明示されている
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする

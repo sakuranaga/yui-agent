@@ -19,18 +19,19 @@ import { gcalCreateEvent } from "@/lib/tools/schedule/gcal_create_event";
 import { gcalDeleteEvent } from "@/lib/tools/schedule/gcal_delete_event";
 import { createTimerTool } from "@/lib/tools/timer/create_timer";
 import { isActionIntent } from "@/lib/tools/tool-index";
-import type { ExecutorOutcome } from "@/lib/tools/executor";
+import { runExecutor, type ExecutorComplete, type ExecutorOutcome } from "@/lib/tools/executor";
+import { createDispatchLedger } from "@/lib/tools/dispatch";
 import type { UnifiedToolOutcome } from "@/lib/tools/outcome";
 import type { ToolContext } from "@/lib/tools/types";
 
 type EvalCase = {
   name: string;
-  run: () => void;
+  run: () => void | Promise<void>;
 };
 
 const cases: EvalCase[] = [];
 
-function test(name: string, run: () => void) {
+function test(name: string, run: () => void | Promise<void>) {
   cases.push({ name, run });
 }
 
@@ -54,6 +55,24 @@ function textResult(content: unknown, toolUseId = "tu_eval") {
 
 function toolResult(content: unknown, toolUseId = "tu_eval"): Anthropic.ToolResultBlockParam {
   return textResult(content, toolUseId);
+}
+
+function messageWithToolUses(toolUses: Anthropic.ToolUseBlock[]): Anthropic.Message {
+  return {
+    id: `msg_${Math.random().toString(16).slice(2)}`,
+    type: "message",
+    role: "assistant",
+    model: "eval",
+    content: toolUses,
+    stop_reason: "tool_use",
+    stop_sequence: null,
+    usage: {
+      input_tokens: 1,
+      output_tokens: 1,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+  };
 }
 
 test("request parser accepts legacy single message", () => {
@@ -564,20 +583,141 @@ test("timer dedup normalizes timer and alarm timing", () => {
   assert.equal(createTimerTool.dedup?.title(alarmInput), "起床");
 });
 
-let passed = 0;
-for (const c of cases) {
-  try {
-    c.run();
-    passed += 1;
-    console.log(`ok ${passed} - ${c.name}`);
-  } catch (e) {
-    console.error(`not ok ${passed + 1} - ${c.name}`);
-    console.error(e);
-    process.exitCode = 1;
-    break;
+test("executor extra tool bridge stops after async dispatch", async () => {
+  const complete: ExecutorComplete = async () =>
+    messageWithToolUses([
+      {
+        type: "tool_use",
+        id: "tu_extra_1",
+        name: "ask_schedule_specialist",
+        input: { query: "明日の予定を詳しく確認して" },
+      },
+    ]);
+  const result = await runExecutor({
+    recentHistory: [{ role: "user", content: "明日の予定を詳しく確認して" }],
+    tools: [],
+    extraTools: [
+      {
+        name: "ask_schedule_specialist",
+        description: "schedule specialist",
+        input_schema: { type: "object", properties: { query: { type: "string" } } },
+      },
+    ],
+    ctx: toolCtx("extra-bridge-1"),
+    ledger: createDispatchLedger({ budget: 4 }),
+    complete,
+    onExtraTool: async (tu) => ({
+      executionState: "executed",
+      disposition: "silent",
+      result: toolResult({ dispatched: true, job_id: 123 }, tu.id),
+    }),
+  });
+  assert.equal(result.stopReason, "async_dispatched");
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0]?.toolName, "ask_schedule_specialist");
+  assert.equal(result.outcomes[0]?.outcome.executionState, "executed");
+});
+
+test("executor extra tool bridge reports judge skip", async () => {
+  const complete: ExecutorComplete = async () =>
+    messageWithToolUses([
+      {
+        type: "tool_use",
+        id: "tu_extra_skip",
+        name: "ask_schedule_specialist",
+        input: { query: "もう処理済みの予定確認" },
+      },
+    ]);
+  const result = await runExecutor({
+    recentHistory: [{ role: "user", content: "ありがとう" }],
+    tools: [],
+    extraTools: [
+      {
+        name: "ask_schedule_specialist",
+        description: "schedule specialist",
+        input_schema: { type: "object", properties: { query: { type: "string" } } },
+      },
+    ],
+    ctx: toolCtx("extra-bridge-2"),
+    ledger: createDispatchLedger({ budget: 4 }),
+    complete,
+    onExtraTool: async (tu) => ({
+      executionState: "skipped",
+      disposition: "report",
+      skipReason: "duplicate",
+      result: toolResult({ skipped: true, reason: "judge skip" }, tu.id),
+    }),
+  });
+  assert.equal(result.stopReason, "no_progress");
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0]?.outcome.executionState, "skipped");
+});
+
+test("executor extra tool bridge suppresses duplicate dispatch in one turn", async () => {
+  let dispatchCount = 0;
+  const complete: ExecutorComplete = async () =>
+    messageWithToolUses([
+      {
+        type: "tool_use",
+        id: "tu_extra_dup_1",
+        name: "ask_schedule_specialist",
+        input: { query: "明日の予定" },
+      },
+      {
+        type: "tool_use",
+        id: "tu_extra_dup_2",
+        name: "ask_schedule_specialist",
+        input: { query: "明日の予定" },
+      },
+    ]);
+  const result = await runExecutor({
+    recentHistory: [{ role: "user", content: "明日の予定を確認して" }],
+    tools: [],
+    extraTools: [
+      {
+        name: "ask_schedule_specialist",
+        description: "schedule specialist",
+        input_schema: { type: "object", properties: { query: { type: "string" } } },
+      },
+    ],
+    ctx: toolCtx("extra-bridge-3"),
+    ledger: createDispatchLedger({ budget: 4 }),
+    complete,
+    onExtraTool: async (tu) => {
+      dispatchCount++;
+      return {
+        executionState: "executed",
+        disposition: "silent",
+        result: toolResult({ dispatched: true, job_id: dispatchCount }, tu.id),
+      };
+    },
+  });
+  assert.equal(dispatchCount, 1);
+  assert.equal(result.stopReason, "async_dispatched");
+  assert.equal(result.outcomes.length, 2);
+  assert.equal(result.outcomes[0]?.outcome.executionState, "executed");
+  assert.equal(result.outcomes[1]?.outcome.executionState, "skipped");
+  assert.equal(result.outcomes[1]?.outcome.skipReason, "duplicate");
+});
+
+async function main() {
+  let passed = 0;
+  for (const c of cases) {
+    try {
+      await c.run();
+      passed += 1;
+      console.log(`ok ${passed} - ${c.name}`);
+    } catch (e) {
+      console.error(`not ok ${passed + 1} - ${c.name}`);
+      console.error(e);
+      process.exitCode = 1;
+      break;
+    }
+  }
+
+  if (process.exitCode !== 1) {
+    console.log(`\n${passed}/${cases.length} tool runtime evals passed`);
   }
 }
 
-if (process.exitCode !== 1) {
-  console.log(`\n${passed}/${cases.length} tool runtime evals passed`);
-}
+void main();
