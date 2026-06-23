@@ -419,6 +419,8 @@ docker compose logs --since 1m web
   - 終日 date anchor
   - dateTime の UTC 分単位正規化
   - invalid dateTime の拒否
+  - title lexical 正規化
+  - calendar / reminder / timer の dedup key fixture
 
 次の拡張:
 - LLM-backed Gate fixture eval

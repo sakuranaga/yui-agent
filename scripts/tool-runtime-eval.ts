@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import { parseChatRequest } from "@/lib/chat/request-parser";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import { briefToolInput } from "@/lib/chat/tool-summary";
-import { normalizeAnchorDateTime } from "@/lib/tools/dedup-guard";
+import { normalizeAnchorDateTime, normalizeDedupTitle } from "@/lib/tools/dedup-guard";
 import { normalizeToolGateDecision } from "@/lib/tools/gate";
+import { addReminderTool } from "@/lib/tools/reminder/add_reminder";
+import { gcalCreateEvent } from "@/lib/tools/schedule/gcal_create_event";
+import { gcalDeleteEvent } from "@/lib/tools/schedule/gcal_delete_event";
+import { createTimerTool } from "@/lib/tools/timer/create_timer";
 import { isActionIntent } from "@/lib/tools/tool-index";
 import type { ExecutorOutcome } from "@/lib/tools/executor";
 import type { UnifiedToolOutcome } from "@/lib/tools/outcome";
+import type { ToolContext } from "@/lib/tools/types";
 
 type EvalCase = {
   name: string;
@@ -17,6 +22,16 @@ const cases: EvalCase[] = [];
 
 function test(name: string, run: () => void) {
   cases.push({ name, run });
+}
+
+function toolCtx(sessionId = "s1"): ToolContext {
+  return {
+    sessionId,
+    caller: { kind: "main" },
+    mode: "normal",
+    userUtterance: null,
+    availabilityCache: new Map(),
+  };
 }
 
 function textResult(content: unknown, toolUseId = "tu_eval") {
@@ -286,6 +301,72 @@ test("dedup anchor normalizes dateTime to UTC minute", () => {
 test("dedup anchor rejects invalid dateTime", () => {
   assert.equal(normalizeAnchorDateTime("明日の13時"), null);
   assert.equal(normalizeAnchorDateTime(undefined), null);
+});
+
+test("dedup title normalization removes whitespace and lowercases", () => {
+  assert.equal(normalizeDedupTitle("  Test  Schedule "), "testschedule");
+  assert.equal(normalizeDedupTitle("テ ス ト"), "テスト");
+});
+
+test("calendar create dedup key includes calendar, start, end, all-day flag and title", () => {
+  const input = {
+    calendar_id: "work",
+    summary: "テスト",
+    start: { dateTime: "2026-06-24T13:00:30+09:00", timeZone: "Asia/Tokyo" },
+    end: { dateTime: "2026-06-24T14:00:00+09:00", timeZone: "Asia/Tokyo" },
+  };
+  assert.equal(gcalCreateEvent.dedup?.scope(input, toolCtx()), "calendar:work");
+  assert.equal(gcalCreateEvent.dedup?.anchor(input), "2026-06-24T04:00|2026-06-24T05:00|0");
+  assert.equal(gcalCreateEvent.dedup?.title(input), "テスト");
+});
+
+test("calendar create dedup separates all-day events", () => {
+  const input = {
+    summary: "終日テスト",
+    start: { date: "2026-06-24" },
+    end: { date: "2026-06-25" },
+  };
+  assert.equal(gcalCreateEvent.dedup?.anchor(input), "2026-06-24|2026-06-25|1");
+});
+
+test("calendar delete dedup anchors by event id", () => {
+  const input = { calendar_id: "primary", event_id: "evt-1" };
+  assert.equal(gcalDeleteEvent.dedup?.scope(input, toolCtx()), "calendar:primary");
+  assert.equal(gcalDeleteEvent.dedup?.anchor(input), "evt-1");
+  assert.equal(gcalDeleteEvent.dedup?.title(input), "evt-1");
+});
+
+test("reminder dedup keys include timing, lead minutes and todo reference", () => {
+  const onceInput = {
+    title: "牛乳",
+    schedule_kind: "once",
+    base_at: "2026-06-24T13:00:00+09:00",
+    lead_minutes: 10,
+    ref_todo_id: 42,
+  };
+  assert.equal(addReminderTool.dedup?.scope(onceInput, toolCtx()), "session:s1");
+  assert.equal(addReminderTool.dedup?.anchor(onceInput), "once:2026-06-24T04:00|10|42");
+  assert.equal(addReminderTool.dedup?.title(onceInput), "牛乳");
+});
+
+test("weekly reminder dedup sorts weekdays", () => {
+  const input = {
+    title: "薬",
+    schedule_kind: "weekly",
+    base_time: "08:00",
+    weekdays: [5, 1, 3],
+  };
+  assert.equal(addReminderTool.dedup?.anchor(input), "weekly:08:00:1,3,5|0|");
+});
+
+test("timer dedup normalizes timer and alarm timing", () => {
+  const timerInput = { kind: "timer", duration: 5, duration_unit: "minutes", label: "麺" };
+  const alarmInput = { kind: "alarm", target_at: "2026-06-24T06:30:00+09:00", label: "起床" };
+  assert.equal(createTimerTool.dedup?.scope(timerInput, toolCtx()), "session:s1");
+  assert.equal(createTimerTool.dedup?.anchor(timerInput), "timer:300");
+  assert.equal(createTimerTool.dedup?.title(timerInput), "麺");
+  assert.equal(createTimerTool.dedup?.anchor(alarmInput), "alarm:2026-06-23T21:30");
+  assert.equal(createTimerTool.dedup?.title(alarmInput), "起床");
 });
 
 let passed = 0;

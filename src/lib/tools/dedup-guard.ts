@@ -89,8 +89,8 @@ export async function dedupCheckAndReserve(
           WHERE scope_key = ${scope} AND tool_name = ${toolName} AND dedup_anchor = ${anchor}
             AND status IN ('executing','pending_confirmation','executed')
             AND created_at > ${winSql}`)) as Array<{ title_text: string }>;
-        const norm = normalizeTitle(title);
-        isDup = rows.some((r) => normalizeTitle(r.title_text) === norm);
+        const norm = normalizeDedupTitle(title);
+        isDup = rows.some((r) => normalizeDedupTitle(r.title_text) === norm);
       }
       // anchor == __null__ かつ embedding 失敗 → 判定不能なので衝突なし (二重実行を許す安全側)。
 
@@ -123,7 +123,7 @@ export async function dedupCheckAndReserve(
 }
 
 /** lexical 比較用にタイトルを正規化 (空白除去 + lowercase)。 */
-function normalizeTitle(s: string): string {
+export function normalizeDedupTitle(s: string): string {
   return (s ?? "").replace(/\s+/g, "").toLowerCase();
 }
 
