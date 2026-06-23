@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import { sql } from "@/db/client";
 import { deleteNote } from "@/lib/notes";
+import { gmailSearch } from "@/lib/tools/mail/gmail_search";
+import { gmailListLabels } from "@/lib/tools/mail/gmail_list_labels";
+import { musicNowPlaying } from "@/lib/tools/music/music_now_playing";
+import { spotifyDevices } from "@/lib/tools/music/spotify_devices";
+import { listNews } from "@/lib/tools/news/list_news";
+import { searchNews } from "@/lib/tools/news/search_news";
+import { pinNews } from "@/lib/tools/news/pin_news";
+import { unpinNews } from "@/lib/tools/news/unpin_news";
+import { addProjectTool } from "@/lib/tools/project/add_project";
+import { listProjectsTool } from "@/lib/tools/project/list_projects";
+import { archiveProjectTool } from "@/lib/tools/project/archive_project";
+import { setHealthGoal } from "@/lib/tools/health/set_health_goal";
+import { listHealthGoals } from "@/lib/tools/health/list_health_goals";
+import { deleteHealthGoal } from "@/lib/tools/health/delete_health_goal";
 import { addTodoTool } from "@/lib/tools/todo/add_todo";
 import { searchTodosTool } from "@/lib/tools/todo/search_todos";
 import { completeTodoTool } from "@/lib/tools/todo/complete_todo";
@@ -65,6 +79,10 @@ let noteId = 0;
 let contactIdentifier = "";
 let gcalEventId = "";
 let reminderId = 0;
+let newsSourceId = 0;
+let newsArticleId = 0;
+let projectId = 0;
+let healthGoalId = 0;
 
 test("todo add/search/complete/delete", async () => {
   const title = `${runId} TODO 牛乳`;
@@ -178,6 +196,147 @@ test("reminder add/list/delete", async () => {
   reminderId = 0;
 });
 
+test("gmail labels/search", async () => {
+  const mailCtx = ctx({ kind: "specialist", id: "mail" });
+  try {
+    const available = await gmailListLabels.isAvailable?.({
+      sessionId,
+      availabilityCache: mailCtx.availabilityCache,
+    });
+    assert.equal(available, true, "Gmail readonly scope is not available");
+  } catch (e) {
+    if (allowExternalSkip) {
+      console.warn(`[skip] gmail labels/search: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    throw e;
+  }
+
+  const labels = asRecord(await gmailListLabels.handler({}, mailCtx));
+  assert.ok(Number(labels.count) > 0);
+  const labelRows = labels.labels as Array<Record<string, unknown>>;
+  assert.ok(labelRows.some((l) => l.id === "INBOX" || l.name === "INBOX"));
+
+  const messages = asRecord(await gmailSearch.handler({ query: "newer_than:30d", max_results: 3 }, mailCtx));
+  assert.ok(Number(messages.count) >= 0);
+  assert.ok(Array.isArray(messages.messages));
+});
+
+test("music read-only status/devices", async () => {
+  try {
+    const available = await musicNowPlaying.isAvailable?.({
+      sessionId,
+      availabilityCache: ctx().availabilityCache,
+    });
+    assert.equal(available, true, "Spotify playback scope is not available");
+  } catch (e) {
+    if (allowExternalSkip) {
+      console.warn(`[skip] music read-only status/devices: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    throw e;
+  }
+
+  const nowPlaying = asRecord(await musicNowPlaying.handler({}, ctx()));
+  assert.ok("now_playing" in nowPlaying || "error" in nowPlaying);
+
+  const musicCtx = ctx({ kind: "specialist", id: "music" });
+  const devices = asRecord(await spotifyDevices.handler({}, musicCtx));
+  assert.ok("count" in devices || "error" in devices);
+});
+
+test("news list/search/pin/unpin", async () => {
+  const sourceRows = await sql<Array<{ id: number }>>`
+    INSERT INTO news_sources (name, url, enabled)
+    VALUES (${`${runId} News Source`}, ${`https://example.com/${runId}/rss.xml`}, true)
+    RETURNING id
+  `;
+  newsSourceId = Number(sourceRows[0].id);
+  cleanupTasks.push(async () => {
+    if (newsArticleId) await sql`DELETE FROM news_articles WHERE id = ${newsArticleId}`;
+    if (newsSourceId) await sql`DELETE FROM news_sources WHERE id = ${newsSourceId}`;
+  });
+
+  const articleRows = await sql<Array<{ id: number }>>`
+    INSERT INTO news_articles (source_id, guid, title, link, summary, published_at)
+    VALUES (
+      ${newsSourceId},
+      ${`${runId}-guid`},
+      ${`${runId} ニュースタイトル`},
+      ${`https://example.com/${runId}/article`},
+      ${`ニュース統合eval用の概要 ${runId}`},
+      now()
+    )
+    RETURNING id
+  `;
+  newsArticleId = Number(articleRows[0].id);
+
+  const listed = asRecord(await listNews.handler({ source: runId, limit: 5 }, ctx()));
+  assert.equal(Number(listed.count), 1);
+  const searched = asRecord(await searchNews.handler({ query: runId, limit: 5 }, ctx()));
+  assert.ok(Number(searched.count) >= 1);
+
+  const pinned = String(await pinNews.handler({ id: newsArticleId }, ctx()));
+  assert.match(pinned, /pinned/);
+  const unpinned = String(await unpinNews.handler({ id: newsArticleId }, ctx()));
+  assert.match(unpinned, /unpinned/);
+
+  await sql`DELETE FROM news_articles WHERE id = ${newsArticleId}`;
+  await sql`DELETE FROM news_sources WHERE id = ${newsSourceId}`;
+  newsArticleId = 0;
+  newsSourceId = 0;
+});
+
+test("project add/list/archive", async () => {
+  const name = `${runId} Project`;
+  const added = String(
+    await addProjectTool.handler(
+      { name, color: "#ff4f93", description: "tool domain integration eval" },
+      ctx(),
+    ),
+  );
+  const m = /\bP-(\d+)\b/.exec(added);
+  assert.ok(m, `project id not found in ${added}`);
+  projectId = Number(m[1]);
+  cleanupTasks.push(async () => {
+    if (projectId) await sql`DELETE FROM projects WHERE id = ${projectId}`;
+  });
+
+  const listed = String(await listProjectsTool.handler({ include_archived: true }, ctx()));
+  assert.match(listed, new RegExp(`P-${projectId}`));
+  assert.match(listed, new RegExp(name));
+
+  const archived = String(await archiveProjectTool.handler({ id: projectId }, ctx()));
+  assert.match(archived, /archived/);
+
+  await sql`DELETE FROM projects WHERE id = ${projectId}`;
+  projectId = 0;
+});
+
+test("health goal set/list/delete", async () => {
+  const label = `${runId} Health Goal`;
+  const added = String(
+    await setHealthGoal.handler(
+      { metric_key: "steps_daily", kind: "daily_min", target_value: 1234, label },
+      ctx(),
+    ),
+  );
+  const m = /\bid=(\d+)\b/.exec(added);
+  assert.ok(m, `health goal id not found in ${added}`);
+  healthGoalId = Number(m[1]);
+  cleanupTasks.push(async () => {
+    if (healthGoalId) await deleteHealthGoal.handler({ id: healthGoalId }, ctx()).catch(() => undefined);
+  });
+
+  const listed = String(await listHealthGoals.handler({}, ctx()));
+  assert.match(listed, new RegExp(`id=${healthGoalId}`));
+  assert.match(listed, new RegExp(label));
+
+  const deleted = String(await deleteHealthGoal.handler({ id: healthGoalId }, ctx()));
+  assert.match(deleted, /削除しました/);
+  healthGoalId = 0;
+});
+
 test("gcal create/get/list/delete", async () => {
   const scheduleCtx = ctx({ kind: "specialist", id: "schedule" });
   try {
@@ -266,6 +425,10 @@ async function cleanup() {
   await sql`DELETE FROM reminders WHERE session_id = ${sessionId}`;
   await sql`DELETE FROM todos WHERE session_id = ${sessionId}`;
   await sql`DELETE FROM contacts WHERE session_id = ${sessionId}`;
+  if (newsArticleId) await sql`DELETE FROM news_articles WHERE id = ${newsArticleId}`;
+  if (newsSourceId) await sql`DELETE FROM news_sources WHERE id = ${newsSourceId}`;
+  if (projectId) await sql`DELETE FROM projects WHERE id = ${projectId}`;
+  if (healthGoalId) await deleteHealthGoal.handler({ id: healthGoalId }, ctx()).catch(() => undefined);
   if (noteId) await deleteNote(noteId).catch(() => undefined);
 }
 

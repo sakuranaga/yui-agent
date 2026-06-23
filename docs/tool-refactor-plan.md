@@ -578,7 +578,7 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 
 ### Phase R18: Tool Domain Integration Eval
 
-ステータス: 実装中
+ステータス: 実装完了
 
 目的:
 予定・リマインダー以外の主要ツールドメインも、実 tool handler と実 DB / 外部 API を使って自動回帰確認する。
@@ -593,11 +593,18 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 - Note: save / search / delete
 - Contact: add / search / find / append note / delete
 - Reminder: add / list / delete
+- Gmail: list labels / search
+- Music: now playing / devices
+- News: list / search / pin / unpin
+- Project: add / list / archive
+- Health: set goal / list goals / delete goal
 - Google Calendar: create / get / list / delete
 
 方針:
 - テスト用 `runId` / `sessionId` を付けて作成し、最後に cleanup する
+- DB 系ツールは実 DB にテストデータを作成し、同一 id / identifier を削除する
 - GCal は実 primary calendar に短時間のテスト予定を作成し、同一 event id を削除する
+- Gmail / Music は外部 API の read-only 呼び出しとして、破壊的操作を行わない
 - 通常コマンドは外部API未設定なら skip。strict は外部API未設定を失敗扱いにする
 - 失敗時も best-effort cleanup を走らせる
 
