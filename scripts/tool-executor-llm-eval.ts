@@ -5,19 +5,25 @@ import { createDispatchLedger } from "@/lib/tools/dispatch";
 import { runExecutor, type ExecutorComplete, type ExecutorOutcome } from "@/lib/tools/executor";
 import { gcalCreateEvent } from "@/lib/tools/schedule/gcal_create_event";
 import { gcalDeleteEvent } from "@/lib/tools/schedule/gcal_delete_event";
+import { gcalListEvents } from "@/lib/tools/schedule/gcal_list_events";
 import { addReminderTool } from "@/lib/tools/reminder/add_reminder";
 import { addTodoTool } from "@/lib/tools/todo/add_todo";
 import { saveNote } from "@/lib/tools/note/save_note";
+import { gmailSearch } from "@/lib/tools/mail/gmail_search";
+import { musicNowPlaying } from "@/lib/tools/music/music_now_playing";
+import { listNews } from "@/lib/tools/news/list_news";
+import { searchContactsTool } from "@/lib/tools/contact/search_contacts";
 import type { ToolContext, ToolDef } from "@/lib/tools/types";
 
 type Fixture = {
   name: string;
   recentHistory: Anthropic.MessageParam[];
-  expectedTool: string;
+  expectedTool: string | null;
+  forbiddenTools?: string[];
   validate: (input: unknown) => string[];
 };
 
-const MIN_PASS = Number(process.env.EXECUTOR_LLM_EVAL_MIN_PASS ?? 5);
+const MIN_PASS = Number(process.env.EXECUTOR_LLM_EVAL_MIN_PASS ?? 13);
 const runtimeFacts = [
   "現在日時: 2026-06-23 12:00 JST",
   "タイムゾーン: Asia/Tokyo",
@@ -72,12 +78,38 @@ function firstOutcome(outcomes: ExecutorOutcome[]): ExecutorOutcome | null {
 const tools = [
   cloneForEval(gcalCreateEvent),
   cloneForEval(gcalDeleteEvent),
+  cloneForEval(gcalListEvents),
   cloneForEval(addReminderTool),
   cloneForEval(addTodoTool),
   cloneForEval(saveNote),
+  cloneForEval(gmailSearch),
+  cloneForEval(musicNowPlaying),
+  cloneForEval(listNews),
+  cloneForEval(searchContactsTool),
 ];
 
 const fixtures: Fixture[] = [
+  {
+    name: "calendar read tomorrow",
+    recentHistory: [{ role: "user", content: "明日の予定を教えて" }],
+    expectedTool: "gcal_list_events",
+    validate: (input) => {
+      const i = asRecord(input);
+      const errs: string[] = [];
+      if (!contains(i.time_min, /2026-06-24/)) errs.push("time_min should be tomorrow");
+      if (!contains(i.time_max, /2026-06-25|2026-06-24/)) errs.push("time_max should bound tomorrow");
+      return errs;
+    },
+  },
+  {
+    name: "calendar search by keyword",
+    recentHistory: [{ role: "user", content: "テストを含む予定を探して" }],
+    expectedTool: "gcal_list_events",
+    validate: (input) => {
+      const i = asRecord(input);
+      return textOf(i.q) === "テスト" || contains(i.q, /テスト/) ? [] : ["q should include テスト"];
+    },
+  },
   {
     name: "calendar create self-contained",
     recentHistory: [{ role: "user", content: "明日20時にテスト予定を入れて" }],
@@ -101,6 +133,22 @@ const fixtures: Fixture[] = [
     },
   },
   {
+    name: "calendar create ambiguous no date",
+    recentHistory: [{ role: "user", content: "予定入れといて" }],
+    expectedTool: null,
+    validate: () => [],
+  },
+  {
+    name: "calendar delete without event id should not direct delete",
+    recentHistory: [{ role: "user", content: "テスト予定を削除して" }],
+    expectedTool: "gcal_list_events",
+    forbiddenTools: ["gcal_delete_event"],
+    validate: (input) => {
+      const i = asRecord(input);
+      return contains(i.q, /テスト/) ? [] : ["q should include テスト"];
+    },
+  },
+  {
     name: "reminder create",
     recentHistory: [{ role: "user", content: "今日15時にコーラを買うリマインダーを追加して" }],
     expectedTool: "add_reminder",
@@ -111,6 +159,12 @@ const fixtures: Fixture[] = [
       if (!contains(i.base_at, /2026-06-23.*15/)) errs.push("base_at should be today 15:00 JST");
       return errs;
     },
+  },
+  {
+    name: "reminder ambiguous no time",
+    recentHistory: [{ role: "user", content: "リマインダー追加して" }],
+    expectedTool: null,
+    validate: () => [],
   },
   {
     name: "todo add",
@@ -149,6 +203,36 @@ const fixtures: Fixture[] = [
       return errs;
     },
   },
+  {
+    name: "gmail unread search",
+    recentHistory: [{ role: "user", content: "Gmailで未読メールを探して" }],
+    expectedTool: "gmail_search",
+    validate: (input) => {
+      const i = asRecord(input);
+      return contains(i.query, /is:unread|unread/) ? [] : ["query should search unread mail"];
+    },
+  },
+  {
+    name: "music now playing",
+    recentHistory: [{ role: "user", content: "今流れてる曲は？" }],
+    expectedTool: "music_now_playing",
+    validate: () => [],
+  },
+  {
+    name: "news list",
+    recentHistory: [{ role: "user", content: "ニュース見せて" }],
+    expectedTool: "list_news",
+    validate: () => [],
+  },
+  {
+    name: "contact search",
+    recentHistory: [{ role: "user", content: "連絡先から田中さん探して" }],
+    expectedTool: "search_contacts",
+    validate: (input) => {
+      const i = asRecord(input);
+      return contains(i.query, /田中/) ? [] : ["query should include 田中"];
+    },
+  },
 ];
 
 const complete: ExecutorComplete = async ({ system, messages, tools: anthropicTools }) =>
@@ -176,8 +260,15 @@ async function runFixture(fixture: Fixture): Promise<boolean> {
   const actualTool = outcome?.toolName ?? "(none)";
   const input = outcome?.input;
   const errors = [
-    ...(actualTool === fixture.expectedTool ? [] : [`tool should be ${fixture.expectedTool}`]),
-    ...fixture.validate(input),
+    ...(fixture.forbiddenTools?.includes(actualTool) ? [`forbidden tool was selected: ${actualTool}`] : []),
+    ...(fixture.expectedTool === null
+      ? outcome
+        ? [`no tool should be executed, got ${actualTool}`]
+        : []
+      : actualTool === fixture.expectedTool
+        ? []
+        : [`tool should be ${fixture.expectedTool}`]),
+    ...(fixture.expectedTool === null ? [] : fixture.validate(input)),
   ];
   const ok = errors.length === 0;
   const mark = ok ? "ok" : "not ok";

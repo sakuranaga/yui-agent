@@ -785,6 +785,34 @@ DB / 外部 API / ローカル LLM が無い CI でも最低限の退行検出�
 - 新しい no-log confirm final は引き続き warn になる
 - 削除済み create reservation (`cancelled`) は warn にならない
 
+### Phase R25: Executor LLM Eval Fixture Expansion
+
+ステータス: 実装完了
+
+目的:
+R22 の最小 Executor LLM eval を拡張し、read 系、曖昧 mutation の抑止、削除安全性、他ドメインのツール選択を検証する。
+
+実装予定:
+- `scripts/tool-executor-llm-eval.ts` の fixture 拡充
+- `expectedTool: null` による no_tool / no execution 検証
+- pass threshold を fixture 数に合わせて更新
+
+追加対象:
+- 予定 read: `gcal_list_events`
+- 予定検索: `gcal_list_events` + `q`
+- 曖昧予定作成抑止: 日時不足で作成しない
+- 曖昧リマインダー抑止: 時刻不足で作成しない
+- event_id なし削除抑止: `gcal_delete_event` を直接呼ばない
+- Gmail search
+- music now playing
+- news list
+- contact search
+
+完了条件:
+- `eval:executor-llm` が拡張fixtureで通る
+- 副作用なしの mock handler 方針を維持する
+- typecheck / lint / `check:tool-model` が通る
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
