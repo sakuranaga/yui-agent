@@ -12,6 +12,7 @@ import {
 import { buildChatSystemPrompt } from "@/lib/chat/system-prompt-builder";
 import { buildMemoryContext } from "@/lib/chat/memory-context";
 import { parseChatRequest } from "@/lib/chat/request-parser";
+import { briefToolInput } from "@/lib/chat/tool-summary";
 import {
   persistChatTurn,
   runPostPersistJobs,
@@ -31,91 +32,6 @@ import { pushToSession, pushDebugReport } from "@/lib/jobs/events";
 
 // 主ターンモデルは lib/llm.ts の "main" role で解決 (env: ANTHROPIC_MODEL, default sonnet)。
 // 出力上限はモデル別の entry.maxTokens (#206 §8.10) に委譲 (= main 呼びで maxTokens を渡さない)。
-/**
- * timer/alarm 発火時に Yui main から呼べる tool の制御。
- *
- * v3 ツール基盤 (docs/tool-architecture.md) 以降、直接 tool は ToolDef.allowedModes
- * (= "normal" / "timer" / "background") で個別に許可宣言する形に移行済み。旧
- * TIMER_ALLOWED_TOOLS の hardcoded Set はここでは保持しない。
- *
- * 残るのは「ask_*_specialist umbrella の timer-mode 露出制御」だけで、これは
- * 各 chat ルートの toolsForContext 直後で `specialistAllowedInTimer` を Set で持ち、
- * timer-mode の時だけ specialist 配列を filter する形にしてある。
- *
- * 各 specialist 内部 tool の構成 (= 実装ベース、2026-06 時点):
- *   - mail specialist: gmail_search / gmail_list_labels (= read-only)
- *   - schedule specialist: gcal_list_events / gcal_get_event / gcal_create_event
- *                          / gcal_update_event / gcal_delete_event (= mutation 含む、
- *                          v3 で confirmationPolicy 付与)
- *   - music specialist: spotify_search_play / spotify_volume / spotify_transfer_device
- *                          (= playback 制御のみ、データ mutation なし)
- * timer-mode で schedule / mail specialist を露出させないのは「目覚ましで予定追加 /
- * メール送信」を絶対に防ぐため。
- */
-
-/**
- * 任意 tool の input を 1 行 (~80 文字) のサマリに圧縮。
- * raw_messages.tool_summary に積み、次ターン送信時に「過去ターン実行済み」シグナルとして
- * Sonnet に渡す。idempotency を守るプロンプト的ガード。
- */
-function briefToolInput(toolName: string, input: Record<string, unknown>): string {
-  // よく使う tool は専用フォーマットで人間も読みやすく。
-  const v = (k: string): string | undefined => {
-    const x = input[k];
-    return typeof x === "string" && x.length > 0 ? x : undefined;
-  };
-  switch (toolName) {
-    case "add_todo": {
-      const parts: string[] = [];
-      if (v("title")) parts.push(`title="${v("title")}"`);
-      if (v("project")) parts.push(`project=${v("project")}`);
-      if (v("state")) parts.push(`state=${v("state")}`);
-      return parts.join(" ");
-    }
-    case "update_todo":
-    case "complete_todo":
-    case "delete_todo":
-    case "get_todo": {
-      return v("identifier") ? `identifier=${v("identifier")}` : "";
-    }
-    case "list_todos":
-    case "search_todos": {
-      const q = v("query") ?? v("project") ?? v("tag");
-      return q ? `q=${q.slice(0, 60)}` : "";
-    }
-    case "web_search":
-    case "web_fetch": {
-      const q = v("query") ?? v("url");
-      return q ? `q=${q.slice(0, 60)}` : "";
-    }
-    case "create_timer": {
-      return [v("label"), v("fire_at"), v("relative")].filter(Boolean).join(" ");
-    }
-    case "add_reminder": {
-      const parts: string[] = [];
-      if (v("title")) parts.push(`title="${v("title")}"`);
-      if (v("base_at")) parts.push(`base_at=${v("base_at")}`);
-      if (v("base_time")) parts.push(`base_time=${v("base_time")}`);
-      return parts.join(" ");
-    }
-    case "cancel_timer": {
-      return v("id") ?? v("match") ?? "";
-    }
-    default: {
-      // ask_*_specialist 系: query があれば
-      const q = v("query");
-      if (q) return `query=${q.slice(0, 60)}`;
-      // それ以外は最初の string 値を 1 つだけ
-      for (const [k, val] of Object.entries(input)) {
-        if (typeof val === "string" && val.length > 0) {
-          return `${k}=${val.slice(0, 60)}`;
-        }
-      }
-      return "";
-    }
-  }
-}
-
 import { callLlm, withTrace } from "@/lib/llm";
 import { getAnthropicConfig } from "@/lib/ai-settings";
 
