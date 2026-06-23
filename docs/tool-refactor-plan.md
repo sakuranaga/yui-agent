@@ -555,7 +555,7 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 
 ### Phase R17: Crash Recovery / Reconciliation Design
 
-ステータス: 未着手
+ステータス: 実装完了
 
 目的:
 プロセス再起動や外部 API 成功直後のクラッシュで、pending / executing / external side effect が宙に残る問題への設計を固める。
@@ -564,6 +564,7 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 - 現状の fail-open / cleanup / dedup 保持の限界を整理
 - GCal create / delete の冪等キーまたは reconciliation 方針を設計
 - 実装可能な backstop job を小さく入れるか判断する
+- `docs/tool-crash-recovery-reconciliation.md`
 
 対象:
 - confirm 承認後、handler 成功から `markExecuted` までのクラッシュ
