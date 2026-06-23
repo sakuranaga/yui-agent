@@ -25,6 +25,8 @@
     "eval:tools": "tsx scripts/tool-runtime-eval.ts",
     "eval:gate-llm": "tsx scripts/tool-gate-llm-eval.ts",
     "eval:tool-db": "tsx scripts/tool-db-integration-eval.ts",
+    "eval:tool-domains": "TOOL_DOMAIN_EVAL_ALLOW_EXTERNAL_SKIP=1 tsx scripts/tool-domain-integration-eval.ts",
+    "eval:tool-domains:strict": "tsx scripts/tool-domain-integration-eval.ts",
     "health:tools": "tsx scripts/tool-db-health-check.ts",
     "observe:tools": "tsx scripts/tool-observability-report.ts",
     "db:migrate": "tsx src/db/migrate.ts"

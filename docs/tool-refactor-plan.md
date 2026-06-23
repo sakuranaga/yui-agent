@@ -576,6 +576,31 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 - 実装する/しないの境界が設計書に残っている
 - 実装する場合は destructive でない検証から始める
 
+### Phase R18: Tool Domain Integration Eval
+
+ステータス: 実装中
+
+目的:
+予定・リマインダー以外の主要ツールドメインも、実 tool handler と実 DB / 外部 API を使って自動回帰確認する。
+
+実装:
+- `scripts/tool-domain-integration-eval.ts`
+- `npm run eval:tool-domains`
+- `npm run eval:tool-domains:strict`
+
+対象:
+- TODO: add / search / complete / delete
+- Note: save / search / delete
+- Contact: add / search / find / append note / delete
+- Reminder: add / list / delete
+- Google Calendar: create / get / list / delete
+
+方針:
+- テスト用 `runId` / `sessionId` を付けて作成し、最後に cleanup する
+- GCal は実 primary calendar に短時間のテスト予定を作成し、同一 event id を削除する
+- 通常コマンドは外部API未設定なら skip。strict は外部API未設定を失敗扱いにする
+- 失敗時も best-effort cleanup を走らせる
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
