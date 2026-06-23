@@ -408,6 +408,11 @@ docker compose logs --since 1m web
   - executor declined fallback
   - direct final outcome
   - dedup skip final outcome
+- tool gate
+  - LLM JSON 出力の正規化
+  - no_tool の wait policy 強制
+  - invalid decision の拒否
+  - action intent fallback
 - tool summary
   - reminder / specialist query の要約
 - dedup
@@ -416,7 +421,7 @@ docker compose logs --since 1m web
   - invalid dateTime の拒否
 
 次の拡張:
-- Gate fixture eval
+- LLM-backed Gate fixture eval
 - Dedup precision / recall fixture
 - Confirm recovery fixture
 - 実 DB を使う integration eval

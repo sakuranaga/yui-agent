@@ -3,6 +3,8 @@ import { parseChatRequest } from "@/lib/chat/request-parser";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import { briefToolInput } from "@/lib/chat/tool-summary";
 import { normalizeAnchorDateTime } from "@/lib/tools/dedup-guard";
+import { normalizeToolGateDecision } from "@/lib/tools/gate";
+import { isActionIntent } from "@/lib/tools/tool-index";
 import type { ExecutorOutcome } from "@/lib/tools/executor";
 import type { UnifiedToolOutcome } from "@/lib/tools/outcome";
 
@@ -99,6 +101,57 @@ test("request parser rejects missing messages", () => {
   if (parsed.ok) return;
   assert.equal(parsed.status, 400);
   assert.equal(parsed.error, "messages or message required");
+});
+
+test("tool gate normalization accepts snake_case wait policy", () => {
+  const decision = normalizeToolGateDecision({
+    decision: "tool_required",
+    category: "mutate",
+    wait_policy: "ack_then_wait",
+    confidence: 1.4,
+    reason: "予定登録",
+  });
+  assert.deepEqual(decision, {
+    decision: "tool_required",
+    category: "mutate",
+    waitPolicy: "ack_then_wait",
+    confidence: 1,
+    reason: "予定登録",
+  });
+});
+
+test("tool gate normalization forces no_tool wait policy", () => {
+  const decision = normalizeToolGateDecision({
+    decision: "no_tool",
+    category: "mutate",
+    wait_policy: "ack_then_wait",
+    confidence: -1,
+    reason: "雑談",
+  });
+  assert.deepEqual(decision, {
+    decision: "no_tool",
+    category: "mutate",
+    waitPolicy: "wait",
+    confidence: 0,
+    reason: "雑談",
+  });
+});
+
+test("tool gate normalization rejects invalid decisions", () => {
+  assert.equal(normalizeToolGateDecision({ decision: "maybe" }), null);
+  assert.equal(normalizeToolGateDecision(null), null);
+});
+
+test("action intent fallback recognizes common tool requests", () => {
+  assert.equal(isActionIntent("明日の13時にランチの予定を入れて"), true);
+  assert.equal(isActionIntent("その予定を削除して"), true);
+  assert.equal(isActionIntent("15時に牛乳を買うリマインダーをセット"), true);
+  assert.equal(isActionIntent("ノリのいい音楽をかけて"), true);
+});
+
+test("action intent fallback ignores plain small talk", () => {
+  assert.equal(isActionIntent("元気？"), false);
+  assert.equal(isActionIntent("ありがとう"), false);
 });
 
 test("response planner reports action missed when gate required but executor did nothing", () => {

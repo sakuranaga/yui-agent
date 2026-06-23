@@ -72,7 +72,7 @@ function clampConfidence(v: unknown): number {
   return Math.max(0, Math.min(1, n));
 }
 
-function normalizeDecision(raw: unknown): ToolGateDecision | null {
+export function normalizeToolGateDecision(raw: unknown): ToolGateDecision | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
   const decision = o.decision === "no_tool" ? "no_tool" : o.decision === "tool_required" ? "tool_required" : null;
@@ -142,7 +142,7 @@ export async function decideToolGate(input: ToolGateInput): Promise<ToolGateDeci
     .trim();
 
   try {
-    const parsed = normalizeDecision(parseJsonObject(text));
+    const parsed = normalizeToolGateDecision(parseJsonObject(text));
     return parsed ?? fallbackDecision(`invalid gate json: ${text.slice(0, 120)}`, "parse_error");
   } catch (e) {
     return fallbackDecision(e instanceof Error ? e.message : String(e), "parse_error");
