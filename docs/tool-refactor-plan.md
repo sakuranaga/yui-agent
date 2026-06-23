@@ -509,7 +509,7 @@ docker compose logs --since 1m web
 
 ### Phase R15: Dedup Precision / Recall Fixture
 
-ステータス: 未着手
+ステータス: 実装完了
 
 目的:
 Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化し、閾値や anchor 変更時の退行を検出する。

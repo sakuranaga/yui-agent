@@ -3,7 +3,11 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { parseChatRequest } from "@/lib/chat/request-parser";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import { briefToolInput } from "@/lib/chat/tool-summary";
-import { normalizeAnchorDateTime, normalizeDedupTitle } from "@/lib/tools/dedup-guard";
+import {
+  isLexicalDedupDuplicate,
+  normalizeAnchorDateTime,
+  normalizeDedupTitle,
+} from "@/lib/tools/dedup-guard";
 import { normalizeToolGateDecision } from "@/lib/tools/gate";
 import {
   buildConfirmFallbackReply,
@@ -475,6 +479,13 @@ test("dedup title normalization removes whitespace and lowercases", () => {
   assert.equal(normalizeDedupTitle("テ ス ト"), "テスト");
 });
 
+test("dedup lexical fallback detects same title only", () => {
+  assert.equal(isLexicalDedupDuplicate("テ ス ト", ["テスト"]), true);
+  assert.equal(isLexicalDedupDuplicate("Lunch", [" lunch "]), true);
+  assert.equal(isLexicalDedupDuplicate("ランチ", ["会議", "買い物"]), false);
+  assert.equal(isLexicalDedupDuplicate("", [""]), false);
+});
+
 test("calendar create dedup key includes calendar, start, end, all-day flag and title", () => {
   const input = {
     calendar_id: "work",
@@ -485,6 +496,23 @@ test("calendar create dedup key includes calendar, start, end, all-day flag and 
   assert.equal(gcalCreateEvent.dedup?.scope(input, toolCtx()), "calendar:work");
   assert.equal(gcalCreateEvent.dedup?.anchor(input), "2026-06-24T04:00|2026-06-24T05:00|0");
   assert.equal(gcalCreateEvent.dedup?.title(input), "テスト");
+});
+
+test("calendar create dedup separates same title at different start times", () => {
+  const base = {
+    calendar_id: "primary",
+    summary: "テスト",
+    end: { dateTime: "2026-06-24T14:00:00+09:00", timeZone: "Asia/Tokyo" },
+  };
+  const first = {
+    ...base,
+    start: { dateTime: "2026-06-24T13:00:00+09:00", timeZone: "Asia/Tokyo" },
+  };
+  const second = {
+    ...base,
+    start: { dateTime: "2026-06-24T15:00:00+09:00", timeZone: "Asia/Tokyo" },
+  };
+  assert.notEqual(gcalCreateEvent.dedup?.anchor(first), gcalCreateEvent.dedup?.anchor(second));
 });
 
 test("calendar create dedup separates all-day events", () => {
