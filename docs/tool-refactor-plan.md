@@ -312,7 +312,8 @@ HTTP request parsing と chat turn orchestration を分ける。
 
 ### Phase R8: Dead Import / Legacy Tool Cleanup
 
-ステータス: 未着手
+ステータス: 完了
+コミット: `TBD チャットルートの未使用importを整理`
 
 目的:
 `route.ts` に残る旧 inline tool 時代の未使用 import を整理する。
@@ -327,7 +328,7 @@ HTTP request parsing と chat turn orchestration を分ける。
 
 完了条件:
 - `route.ts` の未使用 import warning が原則 0
-- `periodic/mail-poll.ts` の既存 warning は別途対応
+- `periodic/mail-poll.ts` の既存 warning も解消済み
 
 ### Phase R9: Regression / Eval
 

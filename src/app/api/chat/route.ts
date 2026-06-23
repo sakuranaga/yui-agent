@@ -26,65 +26,8 @@ import { createDispatchLedger } from "@/lib/tools/dispatch";
 import { buildUntrustedContentGuard } from "@/lib/tools/untrusted-wrap";
 import type { ToolContext, ToolCaller, ToolMode } from "@/lib/tools/types";
 import { classifyEmotion } from "@/lib/emotion";
-import {
-  listArticles as listNewsArticles,
-  listSources as listNewsSources,
-  pinArticle as pinNewsArticle,
-} from "@/lib/news";
 import { clientError } from "@/lib/api-error";
-import { fetchUrl, searchWeb } from "@/lib/tools/web";
 import { pushToSession, pushDebugReport } from "@/lib/jobs/events";
-import { collectSecretaryStats } from "@/lib/secretary-stats";
-import {
-  getMorningBriefForDate,
-  getLatestMorningBrief,
-  listMorningBriefs,
-  briefDateYmd,
-} from "@/lib/morning-briefs";
-import {
-  cancelTimer,
-  cancelTimerByMatch,
-  createTimer,
-  listActiveTimers,
-} from "@/lib/timers";
-import {
-  addTodo,
-  updateTodo,
-  completeTodo,
-  deleteTodo,
-  getTodoByIdentifier,
-  listTodos,
-  searchTodos,
-  listProjects,
-  getOrCreateProject,
-  archiveProject,
-  formatTodoCompact,
-  formatTodoListMarkdown,
-  formatProjectListMarkdown,
-} from "@/lib/todos";
-import {
-  addContact,
-  updateContact,
-  appendContactNote,
-  appendContactValue,
-  deleteContact,
-  restoreContact,
-  getContactByIdentifier,
-  searchContacts,
-  listContacts,
-  formatContactCompact,
-  formatContactDetailMarkdown,
-  formatContactListMarkdown,
-  type ContactValue,
-} from "@/lib/contacts";
-import {
-  getDiaryEntry,
-  getLatestDiary,
-  listDiary,
-  searchDiary,
-  generateDiaryEntry,
-  formatDiaryCompact,
-} from "@/lib/diary";
 
 // 主ターンモデルは lib/llm.ts の "main" role で解決 (env: ANTHROPIC_MODEL, default sonnet)。
 // 出力上限はモデル別の entry.maxTokens (#206 §8.10) に委譲 (= main 呼びで maxTokens を渡さない)。
@@ -109,29 +52,6 @@ import {
  * timer-mode で schedule / mail specialist を露出させないのは「目覚ましで予定追加 /
  * メール送信」を絶対に防ぐため。
  */
-
-/**
- * tool 失敗時の tool_result block を作る (JSON 形式)。Error instance か文字列のどちらでも。
- * is_error: true を付けて Sonnet に明示。
- */
-function errResult(
-  tu: Anthropic.ToolUseBlock,
-  e: unknown
-): Anthropic.ToolResultBlockParam {
-  return {
-    type: "tool_result" as const,
-    tool_use_id: tu.id,
-    content: JSON.stringify({
-      error: errString(e),
-    }),
-    is_error: true,
-  };
-}
-
-/** Error / 任意値から 1 行のメッセージ文字列を取り出す。content が plain string 形式の error 用。 */
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 /**
  * 任意 tool の input を 1 行 (~80 文字) のサマリに圧縮。

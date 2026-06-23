@@ -18,7 +18,7 @@ import { fetchBodiesForMessages } from "@/lib/mail-body";
 import { getMailCurationSettings } from "@/lib/mail-curation-settings";
 import { broadcastMailInserted } from "@/lib/jobs/events";
 import { dispatchNotification } from "@/lib/notifications";
-import { gte, isNull, and, inArray, eq } from "drizzle-orm";
+import { gte, isNull, and, inArray } from "drizzle-orm";
 
 // blocked リストに入っている送信者のメールは「そもそも DB に入れない」方針。
 // ブロック = LLM にも渡さず、自 DB にも残らない (= 完全に存在しないかのように扱う)。
