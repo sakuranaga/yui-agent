@@ -112,6 +112,8 @@ DB 健全性:
 ```bash
 docker compose exec -T web npm run health:tools
 docker compose exec -T web npm run eval:tool-db
+docker compose exec -T web npm run reconcile:tools
+docker compose exec -T web npm run eval:tool-reconcile
 ```
 
 運用観測:
@@ -119,6 +121,9 @@ docker compose exec -T web npm run eval:tool-db
 ```bash
 docker compose exec -T web npm run observe:tools
 ```
+
+`reconcile:tools` は読み取り専用 dry-run として、古い `pending_confirmation` / `executing` / `running task` /
+confirm final と reservation の不整合を検出する。初期実装では外部 API の replay や DB 自動補完は行わない。
 
 ## 6. 次に実装するなら
 

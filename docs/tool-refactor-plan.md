@@ -608,6 +608,39 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 - 通常コマンドは外部API未設定なら skip。strict は外部API未設定を失敗扱いにする
 - 失敗時も best-effort cleanup を走らせる
 
+### Phase R19: Tool Reconciliation Dry-run
+
+ステータス: 実装完了
+
+目的:
+プロセス再起動や外部 API 成功直後のクラッシュで、`tool_execution_log` / `tasks` / confirm final の状態がずれた候補を検出する。
+外部 API の mutation は replay せず、まず読み取り専用の dry-run report と fixture eval で検出能力を固定する。
+
+実装予定:
+- `scripts/tool-reconciliation-report.ts`
+- `scripts/tool-reconciliation-eval.ts`
+- `npm run reconcile:tools`
+- `npm run eval:tool-reconcile`
+
+対象:
+- 古い `pending_confirmation`
+- confirm token 未紐付けの古い `pending_confirmation`
+- 古い `executing` reservation
+- 古い `tasks.status='running'`
+- `tool_execution_log.status='executed'` だが `tasks.output.confirmFinal` が無い confirm token
+- `tasks.output.confirmFinal.success=true` だが executed reservation が見つからない confirm token
+
+方針:
+- 初期実装は read-only。外部 API の再実行・補償・自動成功化はしない
+- 各 issue に `severity` / `action` / 対象 id を出す
+- eval は専用 `runId` の fixture row だけを作成し、cleanup する
+- 将来 `--fix` を入れる場合も、まず stale pending の cancel のような副作用が DB 内に閉じるものだけを対象にする
+
+完了条件:
+- `reconcile:tools` が現状DBで実行できる
+- `eval:tool-reconcile` が fixture の不整合を検出できる
+- typecheck / lint / 既存 eval が通る
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
