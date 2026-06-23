@@ -281,11 +281,12 @@ function translateResponse(
       content.push({ type: "tool_use", id: `xlam_${res.id}_${i}`, name: c.name, input: c.arguments ?? {} });
     });
   } else if (textOut.length > 0) {
-    // 診断: tools を渡したのに content を tool_use 化できなかった (xLAM 等が special token prefix /
-    // 全角 / 非 JSON / allowlist 外 name を返した等)。生 content を出して原因を可視化する。
-    if (allowedToolNames && allowedToolNames.size > 0) {
-      console.warn(
-        `[openai-adapter] tools 有りだが content を tool_use 化できず (no_tool_calls になる): ${JSON.stringify(textOut.slice(0, 400))}`,
+    // 診断: tools を渡したのに content を tool_use 化できなかった場合でも、
+    // Executor 側では text 応答として no_tool_calls/fallback に吸収できる。
+    // 運用エラーではないため warn にはしない。
+    if (process.env.NODE_ENV !== "production" && allowedToolNames && allowedToolNames.size > 0) {
+      console.debug(
+        `[openai-adapter] tools content was not parsed as tool_use (handled as text): ${JSON.stringify(textOut.slice(0, 400))}`,
       );
     }
     content.push({ type: "text", text: textOut, citations: [] });

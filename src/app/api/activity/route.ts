@@ -16,11 +16,14 @@ import { clientError } from "@/lib/api-error";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as {
+    const body = (await req.json().catch(() => null)) as {
       sessionId?: string;
       state?: string;
       lastActivityAt?: number;
-    };
+    } | null;
+    if (!body || typeof body !== "object") {
+      return NextResponse.json({ error: "invalid json" }, { status: 400 });
+    }
     if (!body.sessionId) {
       return NextResponse.json({ error: "sessionId required" }, { status: 400 });
     }
