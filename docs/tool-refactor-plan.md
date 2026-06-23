@@ -423,10 +423,28 @@ docker compose logs --since 1m web
   - calendar / reminder / timer の dedup key fixture
 
 次の拡張:
-- LLM-backed Gate fixture eval
 - Dedup precision / recall fixture
 - Confirm recovery fixture
 - 実 DB を使う integration eval
+
+### Phase R12: LLM-backed Gate Fixture Eval
+
+ステータス: 実装完了
+
+目的:
+モデル変更・プロンプト変更で Tool Gate の分類が退行していないかを、実モデル呼び出しで検出する。
+通常の決定的 eval とは分離し、ローカルLLM / API が利用できる環境で任意実行する。
+
+実装:
+- `scripts/tool-gate-llm-eval.ts`
+- `npm run eval:gate-llm`
+
+対象:
+- 雑談 no_tool
+- 予定確認 read
+- 予定登録 mutate
+- 履歴参照を含む予定登録 mutate
+- 音楽制御 transport
 
 ### Phase R11: Tool DB Health Check
 
