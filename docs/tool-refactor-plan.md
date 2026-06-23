@@ -297,7 +297,7 @@ HTTP request parsing と chat turn orchestration を分ける。
 #### Phase R7b: Turn Helper の追加分離
 
 ステータス: 完了
-コミット: `TBD ツール実行要約を分離`
+コミット: `a045261 ツール実行要約を分離`
 
 役割:
 - `request-parser.ts`: body validation / source / timerEvent / message normalization
