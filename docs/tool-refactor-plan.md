@@ -422,10 +422,7 @@ docker compose logs --since 1m web
   - title lexical 正規化
   - calendar / reminder / timer の dedup key fixture
 
-次の拡張:
-- Dedup precision / recall fixture
-- Confirm recovery fixture
-- 実 DB を使う integration eval
+次の拡張は R13 以降にフェーズ化して実施する。
 
 ### Phase R12: LLM-backed Gate Fixture Eval
 
@@ -463,6 +460,118 @@ docker compose logs --since 1m web
 - `tasks.status='running'` が一定時間を超えて残っていないこと
 - 直近 window に `tool_execution_log.status='failed'` / `tasks.status='failed'` がないこと
 - 現在の pending / executing 件数と直近 execution status 分布を診断表示する
+
+### Phase R13: Confirm Recovery Fixture
+
+ステータス: 実装完了
+
+目的:
+確認ダイアログ境界で起きる二重報告・確認中表示の残留・誤完了報告を、LLM / DB / 外部 API に依存しない fixture で固定する。
+
+実装予定:
+- `scripts/tool-runtime-eval.ts` に confirm result / outcome / response planner の fixture を追加
+- `confirm-result-controller.ts` の fallback reply / toolSummary 生成を pure function として検証できるようにする
+
+対象:
+- `confirm_required` tool result が `pending_confirmation` / `confirmation` として扱われる
+- pending confirmation は `finalDirectOutcomes` に入らず、完了報告候補にならない
+- 承認成功時の fallback reply が input.result の事実だけで生成される
+- 拒否時の fallback reply が未実行として生成される
+- confirm final の toolSummary が `completed` / `not_completed` と event id / title / start を保持する
+
+完了条件:
+- `npm run eval:tools` に confirm fixture が含まれる
+- `typecheck` / `lint` が通る
+- フェーズ単位でコミットする
+
+### Phase R14: DB Integration Eval
+
+ステータス: 未着手
+
+目的:
+実 DB を使い、`tool_execution_log` / `tasks.output` / `raw_messages.tool_summary` の整合を自動確認する。
+外部 API は叩かず、読み取り専用チェックまたは専用 fixture データだけを対象にする。
+
+実装予定:
+- `scripts/tool-db-integration-eval.ts`
+- `npm run eval:tool-db`
+
+対象:
+- pending / executing が残留していない
+- 直近 confirm final の `tasks.output.confirmFinal` が token / state / success / result を持つ
+- confirm final の `raw_messages.source='tool_confirm_result'` に内部ログが混入していない
+- 同一 token の final voice が重複保存されていない
+
+完了条件:
+- 実運用 DB に対して安全な読み取り専用チェックである
+- 失敗時に該当 id / token / session を表示する
+- `health:tools` と役割が重複しすぎない
+
+### Phase R15: Dedup Precision / Recall Fixture
+
+ステータス: 未着手
+
+目的:
+Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化し、閾値や anchor 変更時の退行を検出する。
+
+実装予定:
+- lexical fallback 用の pure 判定を切り出して eval する
+- embedding 依存の precision / recall は任意実行の LLM/embedding-backed eval として分離する
+
+対象:
+- 同一 calendar / 同一時刻 / 同一タイトルは duplicate
+- 同一時刻でも別タイトルは lexical fallback では duplicate にしない
+- 同一タイトルでも別開始時刻は duplicate にしない
+- 削除後 `cancelled` の create reservation は再作成を妨げない
+
+完了条件:
+- pure fixture は `eval:tools` に含める
+- embedding-backed fixture は任意コマンドに分離する
+
+### Phase R16: Tool Metrics / Observability
+
+ステータス: 未着手
+
+目的:
+ユーザーの手動報告に頼らず、Gate / Executor / Dedup / Confirm の退行を運用ログ・DB集計から検出できるようにする。
+
+実装予定:
+- `llm_events` または専用集計で role=tool_gate の latency / fallback / parse_error を確認
+- `tool_execution_log` の status 分布と skip 率を確認
+- confirm abandon / denied / executed 比率を確認
+
+対象:
+- Gate parse_error / llm_error
+- action missed
+- dedup skipped / failed
+- confirm pending / cancelled / executed
+- stage latency p50/p95
+
+完了条件:
+- 開発者が1コマンドで直近状態を確認できる
+- UI debug report と DB metrics の責務を分ける
+
+### Phase R17: Crash Recovery / Reconciliation Design
+
+ステータス: 未着手
+
+目的:
+プロセス再起動や外部 API 成功直後のクラッシュで、pending / executing / external side effect が宙に残る問題への設計を固める。
+
+実装予定:
+- 現状の fail-open / cleanup / dedup 保持の限界を整理
+- GCal create / delete の冪等キーまたは reconciliation 方針を設計
+- 実装可能な backstop job を小さく入れるか判断する
+
+対象:
+- confirm 承認後、handler 成功から `markExecuted` までのクラッシュ
+- `executing` reservation の残留
+- GCal create 成功後の task final 未反映
+- delete 成功後の create dedup cancel 未反映
+
+完了条件:
+- 実装する/しないの境界が設計書に残っている
+- 実装する場合は destructive でない検証から始める
 
 ## 4. コミット方針
 

@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import type Anthropic from "@anthropic-ai/sdk";
 import { parseChatRequest } from "@/lib/chat/request-parser";
 import { planExecutorResponse } from "@/lib/chat/response-planner";
 import { briefToolInput } from "@/lib/chat/tool-summary";
 import { normalizeAnchorDateTime, normalizeDedupTitle } from "@/lib/tools/dedup-guard";
 import { normalizeToolGateDecision } from "@/lib/tools/gate";
+import {
+  buildConfirmFallbackReply,
+  buildConfirmToolSummary,
+} from "@/lib/tools/confirm-result-controller";
+import { toUnifiedToolOutcome } from "@/lib/tools/outcome";
 import { addReminderTool } from "@/lib/tools/reminder/add_reminder";
 import { gcalCreateEvent } from "@/lib/tools/schedule/gcal_create_event";
 import { gcalDeleteEvent } from "@/lib/tools/schedule/gcal_delete_event";
@@ -40,6 +46,10 @@ function textResult(content: unknown, toolUseId = "tu_eval") {
     tool_use_id: toolUseId,
     content: typeof content === "string" ? content : JSON.stringify(content),
   };
+}
+
+function toolResult(content: unknown, toolUseId = "tu_eval"): Anthropic.ToolResultBlockParam {
+  return textResult(content, toolUseId);
 }
 
 test("request parser accepts legacy single message", () => {
@@ -269,6 +279,163 @@ test("response planner reports dedup skips as final direct outcomes", () => {
   });
   assert.equal(plan.finalDirectOutcomes.length, 1);
   assert.match(plan.reportText, /重複スキップ/);
+});
+
+test("confirm required result becomes pending confirmation outcome", () => {
+  const unified = toUnifiedToolOutcome({
+    tool: gcalCreateEvent,
+    toolUseId: "tu_confirm",
+    input: {
+      summary: "テスト",
+      start: { dateTime: "2026-06-24T20:00:00+09:00" },
+      end: { dateTime: "2026-06-24T21:00:00+09:00" },
+    },
+    executionState: "pending_confirmation",
+    disposition: "report",
+    result: toolResult({
+      confirm_required: true,
+      token: "confirm-token-1",
+      tool_name: "gcal_create_event",
+      summary: "予定「テスト」を作成します",
+      input_snapshot: { summary: "テスト" },
+    }),
+  });
+
+  assert.equal(unified.state, "pending_confirmation");
+  assert.equal(unified.responsePolicy, "confirmation");
+  assert.equal(unified.userVisible, "confirmation");
+  assert.equal(unified.confirmToken, "confirm-token-1");
+  assert.deepEqual(unified.confirmation, {
+    token: "confirm-token-1",
+    summary: "予定「テスト」を作成します",
+    policy: "confirm_external_send",
+  });
+});
+
+test("response planner does not treat pending confirmation as final direct outcome", () => {
+  const unified: UnifiedToolOutcome = {
+    id: "tu_confirm",
+    source: "chat_turn",
+    toolName: "gcal_create_event",
+    kind: "direct",
+    state: "pending_confirmation",
+    disposition: "report",
+    responsePolicy: "confirmation",
+    userVisible: "confirmation",
+    confirmToken: "confirm-token-1",
+    input: { summary: "テスト" },
+    result: { confirm_required: true },
+    confirmation: {
+      token: "confirm-token-1",
+      summary: "予定「テスト」を作成します",
+      policy: "confirm_external_send",
+    },
+  };
+  const plan = planExecutorResponse({
+    outcomes: [
+      {
+        toolName: "gcal_create_event",
+        input: { summary: "テスト" },
+        outcome: {
+          executionState: "pending_confirmation",
+          disposition: "report",
+          result: toolResult({ confirm_required: true }),
+          unifiedOutcome: unified,
+        },
+      },
+    ],
+    stopReason: "pending_confirmation",
+    isUserTurn: true,
+    gateRequired: true,
+    didMainFallback: false,
+  });
+
+  assert.equal(plan.finalDirectOutcomes.length, 0);
+  assert.equal(plan.actionMissed, false);
+});
+
+test("confirm success fallback reply uses only confirmed result facts", () => {
+  const reply = buildConfirmFallbackReply({
+    sessionId: "s1",
+    token: "confirm-token-2",
+    toolName: "gcal_create_event",
+    summary: "予定「テスト」を作成します",
+    success: true,
+    result: {
+      created: true,
+      event: {
+        id: "evt-1",
+        summary: "テスト",
+        location: "東京",
+        start: { dateTime: "2026-06-24T20:00:00+09:00" },
+        end: { dateTime: "2026-06-24T21:00:00+09:00" },
+      },
+    },
+  });
+
+  assert.match(reply, /テスト/);
+  assert.match(reply, /東京/);
+  assert.doesNotMatch(reply, /ピクサー|秋葉原|ゴルフ/);
+});
+
+test("confirm denied fallback reply reports not executed", () => {
+  assert.equal(
+    buildConfirmFallbackReply({
+      sessionId: "s1",
+      token: "confirm-token-3",
+      toolName: "gcal_delete_event",
+      summary: "予定「テスト」を削除します",
+      success: false,
+      reason: "user denied",
+    }),
+    "承知しました。予定「テスト」を削除しますはやめておきます。",
+  );
+});
+
+test("confirm tool summary keeps completed calendar event identifiers", () => {
+  assert.deepEqual(
+    buildConfirmToolSummary({
+      sessionId: "s1",
+      token: "confirm-token-4",
+      toolName: "gcal_create_event",
+      summary: "予定「テスト」を作成します",
+      success: true,
+      result: {
+        event: {
+          id: "evt-1",
+          calendar_id: "primary",
+          summary: "テスト",
+          start_jst: "2026-06-24 20:00 JST",
+          end_jst: "2026-06-24 21:00 JST",
+        },
+      },
+    }),
+    [
+      {
+        name: "gcal_create_event",
+        brief: 'completed id=evt-1 calendar=primary title="テスト" start=2026-06-24 20:00 JST end=2026-06-24 21:00 JST',
+      },
+    ],
+  );
+});
+
+test("confirm tool summary marks denied operations as not completed", () => {
+  assert.deepEqual(
+    buildConfirmToolSummary({
+      sessionId: "s1",
+      token: "confirm-token-5",
+      toolName: "gcal_delete_event",
+      summary: "予定「テスト」を削除します",
+      success: false,
+      reason: "user denied",
+    }),
+    [
+      {
+        name: "gcal_delete_event",
+        brief: "not_completed: 予定「テスト」を削除します reason=user denied",
+      },
+    ],
+  );
 });
 
 test("tool summary formats high-signal mutation inputs", () => {

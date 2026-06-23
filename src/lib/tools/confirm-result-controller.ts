@@ -131,7 +131,7 @@ function formatConfirmEventTime(start: unknown, end: unknown): string {
   return `${formatJstDateLabel(dateKey)}、${startTime}${endTime ? `から${endTime}まで` : "から"}`;
 }
 
-function buildFallbackReply(input: ConfirmResultControllerInput): string {
+export function buildConfirmFallbackReply(input: ConfirmResultControllerInput): string {
   if (!input.success) {
     if (input.reason === "user denied") {
       return `承知しました。${input.summary}はやめておきます。`;
@@ -152,7 +152,7 @@ function buildFallbackReply(input: ConfirmResultControllerInput): string {
   return `かしこまりました。${input.summary}が完了しました。`;
 }
 
-function buildConfirmToolSummary(input: ConfirmResultControllerInput): Array<{ name: string; brief: string }> {
+export function buildConfirmToolSummary(input: ConfirmResultControllerInput): Array<{ name: string; brief: string }> {
   const state = input.success ? "completed" : "not_completed";
   const reason = input.reason ? ` reason=${input.reason}` : "";
   const root = asRecord(input.result);
@@ -192,7 +192,7 @@ function buildConfirmToolSummary(input: ConfirmResultControllerInput): Array<{ n
 async function generateConfirmResultReply(
   input: ConfirmResultControllerInput
 ): Promise<string> {
-  const fallback = buildFallbackReply(input);
+  const fallback = buildConfirmFallbackReply(input);
   const persona = await loadPersona();
   const personaPrompt = buildYuiSystemPrompt(persona);
   const payload = {
