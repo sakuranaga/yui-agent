@@ -486,7 +486,7 @@ docker compose logs --since 1m web
 
 ### Phase R14: DB Integration Eval
 
-ステータス: 未着手
+ステータス: 実装完了
 
 目的:
 実 DB を使い、`tool_execution_log` / `tasks.output` / `raw_messages.tool_summary` の整合を自動確認する。
