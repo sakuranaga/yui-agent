@@ -530,7 +530,7 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 
 ### Phase R16: Tool Metrics / Observability
 
-ステータス: 未着手
+ステータス: 実装完了
 
 目的:
 ユーザーの手動報告に頼らず、Gate / Executor / Dedup / Confirm の退行を運用ログ・DB集計から検出できるようにする。
@@ -539,6 +539,8 @@ Dedup の「弾くべき重複」と「許可すべき別件」を fixture 化�
 - `llm_events` または専用集計で role=tool_gate の latency / fallback / parse_error を確認
 - `tool_execution_log` の status 分布と skip 率を確認
 - confirm abandon / denied / executed 比率を確認
+- `scripts/tool-observability-report.ts`
+- `npm run observe:tools`
 
 対象:
 - Gate parse_error / llm_error
