@@ -671,6 +671,34 @@ fix しない対象:
 - warn 系 issue は必要に応じて残る
 - typecheck / lint / 既存 eval が通る
 
+### Phase R21: Dedup Embedding Precision / Recall Eval
+
+ステータス: 実装完了
+
+目的:
+dedup 設計の主目的である embedding 類似判定について、実 embedding service / 実 DB / `dedupCheckAndReserve` を使った回帰テストを追加する。
+R15 の pure fixture では見えていなかった「文字違いの同一意図を弾く」「同一 anchor でも別件は通す」を検証する。
+
+実装予定:
+- `scripts/tool-dedup-embedding-eval.ts`
+- `npm run eval:dedup-embed`
+
+対象:
+- 同一 calendar / 同一開始終了 / 同義タイトルは duplicate skip になる
+- 同一 calendar / 同一開始終了 / 別タイトルは reservation される
+- skipped / executed / executing の記録が fixture scope 内で期待どおり残る
+- cleanup で fixture scope の `tool_execution_log` を削除する
+
+方針:
+- 実 GCal handler は呼ばない。外部カレンダーには書き込まない
+- 実 embedding service と pgvector cosine 経路は使う
+- embedding service 未起動は失敗として扱う
+- 閾値調整時はこの eval を先に見る
+
+完了条件:
+- `eval:dedup-embed` が Docker 内で通る
+- typecheck / lint / 既存 `eval:tools` が通る
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
