@@ -23,6 +23,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --incremental false",
     "eval:tools": "tsx scripts/tool-runtime-eval.ts",
+    "health:tools": "tsx scripts/tool-db-health-check.ts",
     "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {

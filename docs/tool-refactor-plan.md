@@ -426,6 +426,24 @@ docker compose logs --since 1m web
 - Confirm recovery fixture
 - 実 DB を使う integration eval
 
+### Phase R11: Tool DB Health Check
+
+ステータス: 実装完了
+
+目的:
+手動で確認していた `tool_execution_log` / `tasks` の状態を、読み取り専用の運用チェックとして自動化する。
+ツール実行後に「宙に残った確認待ち」「長時間 running task」「直近 failed」を即座に検出できるようにする。
+
+実装:
+- `scripts/tool-db-health-check.ts`
+- `npm run health:tools`
+
+判定:
+- `tool_execution_log.status='pending_confirmation'` が一定時間を超えて残っていないこと
+- `tasks.status='running'` が一定時間を超えて残っていないこと
+- 直近 window に `tool_execution_log.status='failed'` / `tasks.status='failed'` がないこと
+- 現在の pending / executing 件数と直近 execution status 分布を診断表示する
+
 ## 4. コミット方針
 
 - フェーズ単位でコミットする
