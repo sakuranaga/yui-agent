@@ -280,7 +280,7 @@ type ToolOrchestratorResult = {
 
 ### Phase R7: Request Parser / Turn Controller の分離
 
-ステータス: 未着手
+ステータス: 進行中
 
 目的:
 HTTP request parsing と chat turn orchestration を分ける。
@@ -288,6 +288,11 @@ HTTP request parsing と chat turn orchestration を分ける。
 候補ファイル:
 - `src/lib/chat/request-parser.ts`
 - `src/lib/chat/turn-controller.ts`
+
+#### Phase R7a: Request Parser の分離
+
+ステータス: 完了
+コミット: `TBD チャットリクエスト解析を分離`
 
 役割:
 - `request-parser.ts`: body validation / source / timerEvent / message normalization
