@@ -26,7 +26,7 @@ type ProjectInfo = {
   archived: boolean;
 };
 
-type TodoState = "backlog" | "in_progress" | "blocked" | "done";
+type TodoState = "backlog" | "in_progress" | "blocked" | "done" | "cancelled";
 
 type LinkedProject = {
   id: number;
@@ -55,13 +55,14 @@ type TodoRow = {
   project_color: string | null;
 };
 
-const STATES: TodoState[] = ["backlog", "in_progress", "blocked", "done"];
+const STATES: TodoState[] = ["backlog", "in_progress", "blocked", "done", "cancelled"];
 
 const STATE_LABEL: Record<TodoState, string> = {
   backlog: "未着手",
   in_progress: "進行中",
   blocked: "確認待",
   done: "完了",
+  cancelled: "中止",
 };
 const PRIORITY_LABEL: Record<number, string> = { 1: "低", 2: "中", 3: "高" };
 
@@ -99,6 +100,14 @@ function StateIcon({ state, size = 14 }: { state: TodoState; size?: number }) {
       return (
         <svg {...svgProps}>
           <polyline points="20 7 10 18 4 12.5" />
+        </svg>
+      );
+    case "cancelled":
+      // 中止 = 禁止マーク (○ に斜線)。lucide の "ban" 相当。
+      return (
+        <svg {...svgProps}>
+          <circle cx={12} cy={12} r={9} />
+          <line x1={5.6} y1={5.6} x2={18.4} y2={18.4} />
         </svg>
       );
   }
@@ -350,7 +359,7 @@ export default function TodoModal({
   const [tagFilter, _setTagFilter] = useState<string>("");
   // プロジェクト別の TODO 件数サマリ。state チップ脇とフィルタ行末に表示。
   const [stats, setStats] = useState<{
-    byState: { backlog: number; in_progress: number; blocked: number; done: number };
+    byState: { backlog: number; in_progress: number; blocked: number; done: number; cancelled: number };
     doneToday: number;
     doneThisWeek: number;
   } | null>(null);
@@ -365,6 +374,13 @@ export default function TodoModal({
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [addReminderTo, setAddReminderTo] = useState<TodoRow | null>(null);
+  // 複数選択 (一括編集) state。MailModal と同じ流儀。
+  const [checked, setChecked] = useState<Set<number>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+  // Shift+クリックでの range select の起点 (最後にクリックした id)
+  const [anchorId, setAnchorId] = useState<number | null>(null);
+  // 表示中の id 順 (range select に使う)。grouped 構築時に同期する。
+  const visibleIdsRef = useRef<number[]>([]);
   // sessionId は SSR セーフな lazy init で取り込む。
   const [sessionId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
@@ -506,13 +522,43 @@ export default function TodoModal({
       future: [] as TodoRow[],
       noDue: [] as TodoRow[],
       done: [] as TodoRow[],
+      cancelled: [] as TodoRow[],
     };
     for (const r of rows) {
       if (r.state === "done") g.done.push(r);
+      else if (r.state === "cancelled") g.cancelled.push(r);
       else g[bucketOf(r.due_at)].push(r);
     }
     return g;
   }, [rows]);
+
+  // range select 用に、左リストの表示順 (section 順) で id 列を同期する。
+  useEffect(() => {
+    visibleIdsRef.current = [
+      ...grouped.overdue,
+      ...grouped.thisMonth,
+      ...grouped.future,
+      ...grouped.noDue,
+      ...grouped.done,
+      ...grouped.cancelled,
+    ].map((r) => r.id);
+  }, [grouped]);
+
+  // 選択モードを抜けた / モーダルを閉じた時に選択を reset。
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!open) {
+      setChecked(new Set());
+      setSelectMode(false);
+      setAnchorId(null);
+    }
+  }, [open]);
+  // フィルタ変更で行が入れ替わったら選択もクリア (= 見えていない行の選択を残さない)。
+  useEffect(() => {
+    setChecked(new Set());
+    setAnchorId(null);
+  }, [filterKey]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const toggleState = (s: TodoState) => {
     setStateFilter((prev) => {
@@ -522,6 +568,92 @@ export default function TodoModal({
       return next;
     });
   };
+
+  const toggleCheck = useCallback((id: number) => {
+    setChecked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  /**
+   * 行クリック共通ハンドラ (MailModal 踏襲)。
+   * - Shift+click → anchor から click 先まで範囲選択 + selectMode ON
+   * - Ctrl/Meta+click → 個別 toggle + selectMode ON
+   * - 通常クリック →
+   *     selectMode 中なら toggle + 詳細表示
+   *     通常モードなら詳細表示のみ
+   */
+  const handleRowClick = useCallback(
+    (id: number, e: React.MouseEvent) => {
+      if (e.shiftKey && anchorId !== null) {
+        const ids = visibleIdsRef.current;
+        const i1 = ids.indexOf(anchorId);
+        const i2 = ids.indexOf(id);
+        if (i1 >= 0 && i2 >= 0) {
+          const [lo, hi] = i1 < i2 ? [i1, i2] : [i2, i1];
+          const range = ids.slice(lo, hi + 1);
+          setSelectMode(true);
+          setChecked((cur) => {
+            const next = new Set(cur);
+            for (const x of range) next.add(x);
+            return next;
+          });
+          setAnchorId(id);
+          return;
+        }
+      }
+      if (e.ctrlKey || e.metaKey) {
+        setSelectMode(true);
+        toggleCheck(id);
+        setAnchorId(id);
+        return;
+      }
+      if (selectMode) toggleCheck(id);
+      setExpandedId(id);
+      setAnchorId(id);
+    },
+    [anchorId, selectMode, toggleCheck]
+  );
+
+  // 一括 patch (multi-select 用)。dirty フィールドだけ載った patch を受け取り
+  // POST /api/todos/batch する。成功後 checked クリア + reload。
+  const batchPatch = useCallback(
+    async (ids: number[], patch: Record<string, unknown>): Promise<{ failed: number }> => {
+      if (ids.length === 0 || Object.keys(patch).length === 0) return { failed: 0 };
+      try {
+        const res = await fetch("/api/todos/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids, patch }),
+        });
+        if (!res.ok) {
+          // 入力検証 NG / サーバエラー。選択は残して再試行可能にする。
+          console.warn("[todos] batch HTTP error:", res.status);
+          return { failed: ids.length };
+        }
+        const data = (await res.json()) as { failed?: Array<{ id: number }> };
+        const failed = data.failed?.length ?? 0;
+        await reloadAll();
+        void reloadStats();
+        reloadProjects();
+        // 全件成功なら選択解除してパネルを閉じる。一部失敗時は選択を残し、
+        // BulkEditPanel 側で失敗メッセージを表示できるようにする。
+        if (failed === 0) {
+          setChecked(new Set());
+          setSelectMode(false);
+        }
+        return { failed };
+      } catch (e) {
+        console.warn("[todos] batch failed:", e);
+        await reloadAll();
+        return { failed: ids.length };
+      }
+    },
+    [reloadAll, reloadStats, reloadProjects]
+  );
 
   // 単一 todo の部分更新 (API call + ローカル state 同期)
   const patchTodo = useCallback(
@@ -739,6 +871,25 @@ export default function TodoModal({
               aria-label="検索"
             />
           </div>
+          <div className="todo-modal-header-tools">
+            <button
+              type="button"
+              className={`todo-sort-btn ${selectMode ? "active" : ""}`}
+              onClick={() => {
+                setSelectMode((v) => !v);
+                if (selectMode) {
+                  setChecked(new Set());
+                  setAnchorId(null);
+                }
+              }}
+              title="選択モード"
+            >
+              {selectMode ? "選択モード OFF" : "選択モード"}
+            </button>
+            {selectMode && checked.size > 0 && (
+              <span className="todo-checked-info">{checked.size} 件選択</span>
+            )}
+          </div>
           <div className="todo-modal-actions">
             <button
               type="button"
@@ -891,6 +1042,11 @@ export default function TodoModal({
                   {grouped.done.map((r) => renderSummary(r))}
                 </Section>
               )}
+              {grouped.cancelled.length > 0 && (
+                <Section title={`中止 (${grouped.cancelled.length})`}>
+                  {grouped.cancelled.map((r) => renderSummary(r))}
+                </Section>
+              )}
 
               {loading && <div className="todo-loading">読み込み中…</div>}
             </div>
@@ -898,6 +1054,17 @@ export default function TodoModal({
 
           <div className="todo-detail-pane">
             {(() => {
+              if (selectMode && checked.size > 0) {
+                const selectedRows = rows.filter((r) => checked.has(r.id));
+                return (
+                  <BulkEditPanel
+                    key={`bulk-${Array.from(checked).sort((a, b) => a - b).join(",")}`}
+                    rows={selectedRows}
+                    projects={projects}
+                    onApply={(patch) => batchPatch(Array.from(checked), patch)}
+                  />
+                );
+              }
               const selected = rows.find((r) => r.id === expandedId);
               if (!selected) {
                 return (
@@ -1005,6 +1172,10 @@ export default function TodoModal({
         todo={r}
         expanded={expandedId === r.id}
         showDetail={false}
+        selectMode={selectMode}
+        checked={checked.has(r.id)}
+        onRowClick={(e) => handleRowClick(r.id, e)}
+        onCheck={() => toggleCheck(r.id)}
         onToggle={() => setExpandedId(r.id)}
         onPatch={(patch) => patchTodo(r.identifier, patch)}
         onDelete={() => deleteRow(r.identifier)}
@@ -1073,6 +1244,10 @@ function TodoRowView({
   todo,
   expanded,
   showDetail = expanded,
+  selectMode = false,
+  checked = false,
+  onRowClick,
+  onCheck,
   onToggle,
   onPatch,
   onDelete,
@@ -1084,6 +1259,14 @@ function TodoRowView({
   expanded: boolean;
   /** 行下に編集 form を inline 表示するか (右ペインで使う時のみ true) */
   showDetail?: boolean;
+  /** 複数選択モード中か (リスト card でのみ意味あり) */
+  selectMode?: boolean;
+  /** この行が選択 (check) 済みか */
+  checked?: boolean;
+  /** 行クリック共通ハンドラ (shift/ctrl/通常 を親で分岐)。未指定なら onToggle にフォールバック */
+  onRowClick?: (e: React.MouseEvent) => void;
+  /** チェックボックスの toggle */
+  onCheck?: () => void;
   onToggle: () => void;
   onPatch: (patch: Partial<TodoRow> & { project?: string | null }) => void;
   onDelete: () => void;
@@ -1181,9 +1364,19 @@ function TodoRowView({
   if (!showDetail) {
     return (
       <div
-        className={`todo-row ${expanded ? "expanded" : ""}`}
-        onClick={onToggle}
+        className={`todo-row ${expanded ? "expanded" : ""} ${selectMode ? "select-mode" : ""} ${checked ? "checked" : ""}`}
+        onClick={onRowClick ?? (() => onToggle())}
       >
+        {selectMode && (
+          <input
+            type="checkbox"
+            className="todo-row-check"
+            checked={checked}
+            onClick={(e) => e.stopPropagation()}
+            onChange={onCheck}
+            aria-label="選択"
+          />
+        )}
         <div className="todo-row-main todo-row-main-list">
           <button
             type="button"
@@ -1195,6 +1388,8 @@ function TodoRowView({
                 in_progress: "done",
                 done: "backlog",
                 blocked: "in_progress",
+                // 中止は cycle に入れない。クリックで活動状態 (未着手) へ戻すだけ。
+                cancelled: "backlog",
               };
               onChangeState(nextState[todo.state]);
             }}
@@ -1237,7 +1432,7 @@ function TodoRowView({
             )}
           </div>
           <span
-            className={`todo-title-multiline ${todo.state === "done" ? "done" : ""}`}
+            className={`todo-title-multiline ${todo.state === "done" ? "done" : ""} ${todo.state === "cancelled" ? "cancelled" : ""}`}
           >
             {todo.title}
           </span>
@@ -1263,6 +1458,8 @@ function TodoRowView({
               in_progress: "done",
               done: "backlog",
               blocked: "in_progress",
+              // 中止は cycle に入れない。クリックで活動状態 (未着手) へ戻すだけ。
+              cancelled: "backlog",
             };
             onChangeState(next[todo.state]);
           }}
@@ -1286,7 +1483,7 @@ function TodoRowView({
         {showDetail && editingTitle ? (
           <input
             name="todo-title"
-            className={`todo-title todo-title-edit ${todo.state === "done" ? "done" : ""}`}
+            className={`todo-title todo-title-edit ${todo.state === "done" ? "done" : ""} ${todo.state === "cancelled" ? "cancelled" : ""}`}
             value={title}
             autoFocus
             onClick={(e) => e.stopPropagation()}
@@ -1303,7 +1500,7 @@ function TodoRowView({
           />
         ) : (
           <span
-            className={`todo-title ${todo.state === "done" ? "done" : ""}`}
+            className={`todo-title ${todo.state === "done" ? "done" : ""} ${todo.state === "cancelled" ? "cancelled" : ""}`}
             onClick={(e) => {
               if (showDetail) {
                 e.stopPropagation();
@@ -1550,6 +1747,356 @@ function TodoRowView({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * 一括編集パネル (右ペイン)。複数選択中に単票詳細の代わりに表示。
+ *
+ * 変更検知 (dirty) 方式: 各フィールドは選択 TODO の共通値を初期表示し、
+ * 混在は「-」プレースホルダにする。ユーザーが触ったフィールドだけ patch に
+ * 載せて全選択 TODO に適用する。tags は和集合を seed し、編集時のみ置換適用。
+ * title / note / url は対象外。
+ */
+const MIXED = "__mixed__";
+
+function commonValue<T>(values: T[]): T | typeof MIXED {
+  if (values.length === 0) return MIXED;
+  const first = values[0];
+  return values.every((v) => v === first) ? first : MIXED;
+}
+
+function BulkEditPanel({
+  rows,
+  projects,
+  onApply,
+}: {
+  rows: TodoRow[];
+  projects: ProjectInfo[];
+  onApply: (patch: Record<string, unknown>) => Promise<{ failed: number }>;
+}) {
+  // --- 初期表示値 (選択 TODO の共通値 or 混在) ---
+  const initProject = useMemo(
+    () => commonValue(rows.map((r) => r.project_name ?? null)),
+    [rows]
+  );
+  const initState = useMemo(() => commonValue(rows.map((r) => r.state)), [rows]);
+  const initPriority = useMemo(() => commonValue(rows.map((r) => r.priority)), [rows]);
+  const initStart = useMemo(
+    () => commonValue(rows.map((r) => toDateInputValue(r.start_at))),
+    [rows]
+  );
+  const initDue = useMemo(
+    () => commonValue(rows.map((r) => toDateInputValue(r.due_at))),
+    [rows]
+  );
+  const initTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) for (const t of r.tags) set.add(t);
+    return Array.from(set);
+  }, [rows]);
+
+  // --- 編集 state (dirty 判定は init との比較で行う) ---
+  // project: 混在なら MIXED sentinel、共通なら値 (null = Inbox)。
+  const [project, setProject] = useState<string | null | typeof MIXED>(initProject);
+  const [state, setState] = useState<TodoState | typeof MIXED>(initState);
+  const [priority, setPriority] = useState<1 | 2 | 3 | typeof MIXED>(initPriority);
+  const [startAt, setStartAt] = useState<string | typeof MIXED>(initStart);
+  const [dueAt, setDueAt] = useState<string | typeof MIXED>(initDue);
+  // tags は和集合を seed。編集したかを tagsDirty で追う。
+  const [tags, setTags] = useState<string[]>(initTags);
+  const [tagsDirty, setTagsDirty] = useState(false);
+  const [tagInput, setTagInput] = useState("");
+
+  const [editingStart, setEditingStart] = useState(false);
+  const [editingDue, setEditingDue] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [resultMsg, setResultMsg] = useState<string | null>(null);
+
+  // dirty フィールドだけ patch を組み立てる
+  const buildPatch = (): Record<string, unknown> => {
+    const patch: Record<string, unknown> = {};
+    if (project !== MIXED && project !== initProject) patch.project = project;
+    if (state !== MIXED && state !== initState) patch.state = state;
+    if (priority !== MIXED && priority !== initPriority) patch.priority = priority;
+    if (startAt !== MIXED && startAt !== initStart) {
+      patch.start_at = startAt ? dateInputToIso(startAt) : null;
+    }
+    if (dueAt !== MIXED && dueAt !== initDue) {
+      patch.due_at = dueAt ? dateInputToIso(dueAt) : null;
+    }
+    if (tagsDirty) patch.tags = tags;
+    return patch;
+  };
+
+  const dirtyCount = Object.keys(buildPatch()).length;
+
+  const addTag = () => {
+    const v = tagInput.trim();
+    if (!v) return;
+    if (!tags.includes(v)) {
+      setTags([...tags, v]);
+      setTagsDirty(true);
+    }
+    setTagInput("");
+  };
+  const removeTag = (t: string) => {
+    setTags(tags.filter((x) => x !== t));
+    setTagsDirty(true);
+  };
+
+  const projectLabel =
+    project === MIXED ? "-" : project === null ? "Inbox" : project;
+
+  const submit = async () => {
+    const patch = buildPatch();
+    if (Object.keys(patch).length === 0) {
+      setResultMsg("変更がありません");
+      return;
+    }
+    setSubmitting(true);
+    setResultMsg(null);
+    try {
+      const { failed } = await onApply(patch);
+      if (failed > 0) setResultMsg(`${failed} 件の更新に失敗しました`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="todo-bulk-panel">
+      <div className="todo-bulk-head">
+        <h3>{rows.length} 件をまとめて編集</h3>
+        <p className="todo-bulk-note">
+          変更した項目だけ選択中の TODO すべてに適用されます。
+        </p>
+      </div>
+
+      <div className="todo-edit-grid">
+        <label className="todo-edit-label">
+          <span>プロジェクト</span>
+          <div className="todo-bulk-project">
+            <button
+              type="button"
+              className="todo-bulk-project-display"
+              onClick={() => setProjectPickerOpen((v) => !v)}
+              title="プロジェクト変更"
+            >
+              {projectLabel}
+              <svg
+                className="todo-project-chevron"
+                viewBox="0 0 12 8"
+                width="14"
+                height="10"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <polyline points="2 2 6 6 10 2" />
+              </svg>
+            </button>
+            {projectPickerOpen && (
+              <BulkProjectPickerPopup
+                projects={projects}
+                onPick={(v) => {
+                  setProject(v);
+                  setProjectPickerOpen(false);
+                }}
+                onClose={() => setProjectPickerOpen(false)}
+              />
+            )}
+          </div>
+        </label>
+
+        <label className="todo-edit-label">
+          <span>優先度</span>
+          <div className="todo-state-chips">
+            {[1, 2, 3].map((p) => (
+              <button
+                key={p}
+                type="button"
+                className={`todo-state-chip-mini ${priority === p ? "active" : ""}`}
+                onClick={() => setPriority(p as 1 | 2 | 3)}
+              >
+                <PriorityIcon priority={p as 1 | 2 | 3} /> {PRIORITY_LABEL[p]}
+              </button>
+            ))}
+            {priority === MIXED && (
+              <span className="todo-bulk-mixed">-</span>
+            )}
+          </div>
+        </label>
+
+        <label className="todo-edit-label todo-edit-label-wide">
+          <span>状態</span>
+          <div className="todo-state-chips">
+            {STATES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                className={`todo-state-chip-mini ${state === s ? "active" : ""} todo-state-${s}`}
+                onClick={() => setState(s)}
+              >
+                <StateIcon state={s} /> {STATE_LABEL[s]}
+              </button>
+            ))}
+            {state === MIXED && <span className="todo-bulk-mixed">-</span>}
+          </div>
+        </label>
+
+        <div className="todo-date-range todo-edit-label-wide">
+          <div className="todo-date-anchor">
+            <button
+              type="button"
+              className="todo-date-pill"
+              onClick={() => {
+                setEditingDue(false);
+                setEditingStart((v) => !v);
+              }}
+              title="開始日 (クリックで編集)"
+            >
+              <span className="todo-date-label">開始</span>
+              <span className="todo-date-value">
+                {startAt === MIXED ? "-" : fmtDateJa(startAt)}
+              </span>
+            </button>
+            {editingStart && (
+              <MiniCalendar
+                value={startAt === MIXED ? "" : startAt}
+                onChange={(v) => {
+                  setStartAt(v);
+                  setEditingStart(false);
+                }}
+                onClose={() => setEditingStart(false)}
+              />
+            )}
+          </div>
+          <span className="todo-date-arrow" aria-hidden="true">→</span>
+          <div className="todo-date-anchor">
+            <button
+              type="button"
+              className="todo-date-pill"
+              onClick={() => {
+                setEditingStart(false);
+                setEditingDue((v) => !v);
+              }}
+              title="期限 (クリックで編集)"
+            >
+              <span className="todo-date-label">期限</span>
+              <span className="todo-date-value">
+                {dueAt === MIXED ? "-" : fmtDateJa(dueAt)}
+              </span>
+            </button>
+            {editingDue && (
+              <MiniCalendar
+                value={dueAt === MIXED ? "" : dueAt}
+                onChange={(v) => {
+                  setDueAt(v);
+                  setEditingDue(false);
+                }}
+                onClose={() => setEditingDue(false)}
+              />
+            )}
+          </div>
+        </div>
+
+        <label className="todo-edit-label todo-edit-label-wide">
+          <span>タグ{tagsDirty ? "" : " (選択中の和集合)"}</span>
+          <span className="todo-tags todo-tags-edit">
+            {tags.map((t) => (
+              <span key={t} className="todo-tag todo-tag-chip">
+                {t}
+                <button
+                  type="button"
+                  className="todo-tag-chip-x"
+                  onClick={() => removeTag(t)}
+                  aria-label={`${t} を削除`}
+                  title="削除"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <input
+              name="bulk-todo-tag-add"
+              className="todo-tag-add-input"
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              onBlur={() => addTag()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === ",") {
+                  e.preventDefault();
+                  addTag();
+                } else if (e.key === "Escape") {
+                  setTagInput("");
+                }
+              }}
+              placeholder="タグ名"
+            />
+          </span>
+        </label>
+      </div>
+
+      <div className="todo-detail-foot todo-bulk-foot">
+        {resultMsg && <span className="todo-bulk-result">{resultMsg}</span>}
+        <button
+          type="button"
+          className="todo-save-btn"
+          onClick={() => void submit()}
+          disabled={submitting || dirtyCount === 0}
+        >
+          {submitting ? "保存中…" : `保存${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 一括編集パネル用のプロジェクト picker。Inbox (= null) + 全プロジェクト。 */
+function BulkProjectPickerPopup({
+  projects,
+  onPick,
+  onClose,
+}: {
+  projects: ProjectInfo[];
+  onPick: (name: string | null) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [onClose]);
+  const items: { label: string; value: string | null }[] = [
+    { label: "Inbox", value: null },
+    ...projects
+      .filter((p) => !p.archived)
+      .map((p) => ({ label: p.name, value: p.name })),
+  ];
+  return (
+    <div className="todo-project-popup" ref={ref} role="dialog">
+      <ul className="todo-project-popup-list">
+        {items.map((it) => (
+          <li key={it.value ?? "__inbox__"}>
+            <button
+              type="button"
+              className="todo-project-popup-item"
+              onClick={() => onPick(it.value)}
+            >
+              {it.label}
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

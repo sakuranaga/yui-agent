@@ -15,7 +15,7 @@ export const updateTodoTool: ToolDef = {
       tags: { type: "array", items: { type: "string" } },
       note: { type: "string" },
       url: { type: "string" },
-      state: { type: "string", enum: ["backlog", "in_progress", "blocked", "done"] },
+      state: { type: "string", enum: ["backlog", "in_progress", "blocked", "done", "cancelled"], description: "cancelled = もうやらないと決めたもの (完了扱いだが達成には数えない)" },
       priority: { type: "integer", enum: [1, 2, 3] },
       start_at: { type: "string" },
       due_at: { type: "string" },

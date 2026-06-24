@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
     const [p] = await db.select().from(projects).where(eq(projects.name, project)).limit(1);
     if (!p) {
       return NextResponse.json({
-        byState: { backlog: 0, in_progress: 0, blocked: 0, done: 0 },
+        byState: { backlog: 0, in_progress: 0, blocked: 0, done: 0, cancelled: 0 },
         doneToday: 0,
         doneThisWeek: 0,
       });
@@ -76,11 +76,12 @@ export async function GET(req: NextRequest) {
     .where(baseWhere)
     .groupBy(todos.state);
 
-  const byState: Record<"backlog" | "in_progress" | "blocked" | "done", number> = {
+  const byState: Record<"backlog" | "in_progress" | "blocked" | "done" | "cancelled", number> = {
     backlog: 0,
     in_progress: 0,
     blocked: 0,
     done: 0,
+    cancelled: 0,
   };
   for (const r of stateCounts) {
     if (r.state in byState) byState[r.state as keyof typeof byState] = r.count;

@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
   if (states && states.length > 0) {
     conds.push(inArray(todos.state, states));
   } else if (!includeCompleted) {
-    conds.push(sql`${todos.state} != 'done'`);
+    conds.push(sql`${todos.state} not in ('done','cancelled')`);
   }
   if (q) {
     conds.push(

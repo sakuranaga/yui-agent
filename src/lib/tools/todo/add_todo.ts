@@ -18,7 +18,7 @@ export const addTodoTool: ToolDef = {
       tags: { type: "array", items: { type: "string" }, description: "(任意) 自由テキストタグ複数" },
       note: { type: "string" },
       url: { type: "string" },
-      state: { type: "string", enum: ["backlog", "in_progress", "blocked", "done"] },
+      state: { type: "string", enum: ["backlog", "in_progress", "blocked", "done", "cancelled"] },
       priority: { type: "integer", enum: [1, 2, 3] },
       start_at: { type: "string", description: "ISO8601 開始日" },
       due_at: { type: "string", description: "ISO8601 期限" },

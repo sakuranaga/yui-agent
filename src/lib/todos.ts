@@ -111,7 +111,7 @@ export async function listProjectsWithCounts(opts: { includeArchived?: boolean }
     .select({
       projectId: todos.projectId,
       total: sql<number>`count(*)::int`,
-      active: sql<number>`sum(case when ${todos.state} <> 'done' then 1 else 0 end)::int`,
+      active: sql<number>`sum(case when ${todos.state} not in ('done','cancelled') then 1 else 0 end)::int`,
     })
     .from(todos)
     .groupBy(todos.projectId);
@@ -142,7 +142,7 @@ export type AddTodoInput = {
   tags?: string[];
   note?: string;
   url?: string;
-  state?: "backlog" | "in_progress" | "blocked" | "done";
+  state?: "backlog" | "in_progress" | "blocked" | "done" | "cancelled";
   priority?: 1 | 2 | 3;
   startAt?: Date;
   dueAt?: Date;
@@ -245,7 +245,7 @@ export type UpdateTodoInput = {
   tags?: string[];
   note?: string;
   url?: string;
-  state?: "backlog" | "in_progress" | "blocked" | "done";
+  state?: "backlog" | "in_progress" | "blocked" | "done" | "cancelled";
   priority?: 1 | 2 | 3;
   startAt?: Date | null;
   dueAt?: Date | null;
@@ -298,16 +298,64 @@ export async function updateTodo(input: UpdateTodoInput): Promise<Todo | null> {
       refId: row.id,
     });
   }
+  // done / cancelled に遷移したら、その TODO に紐づくリマインダーを片付ける
+  // (もう通知不要)。単票 PATCH 経由でも一貫させるため updateTodo に集約。
+  if (row && (input.state === "done" || input.state === "cancelled")) {
+    await cleanupTodoReminders(row.id);
+  }
   return row ?? null;
 }
 
 export async function completeTodo(identifier: string): Promise<Todo | null> {
-  const row = await updateTodo({ identifier, state: "done" });
-  if (row) {
-    // 完了した TODO に紐づくリマインダーを片付け
-    await cleanupTodoReminders(row.id);
+  // state=done 化 + reminder 片付けは updateTodo に集約済み
+  return updateTodo({ identifier, state: "done" });
+}
+
+/**
+ * 複数 TODO の一括更新。`updateTodo()` を id ごとに逐次呼ぶ best-effort 方式
+ * (グローバル db 直書きのため真の単一 transaction にはしない)。部分成功を許容し、
+ * id ごとの失敗を固定コードで返す。
+ */
+export type BatchTodoPatch = {
+  projectName?: string | null;
+  tags?: string[];
+  state?: "backlog" | "in_progress" | "blocked" | "done" | "cancelled";
+  priority?: 1 | 2 | 3;
+  startAt?: Date | null;
+  dueAt?: Date | null;
+};
+
+export async function batchUpdateTodos(
+  ids: number[],
+  patch: BatchTodoPatch
+): Promise<{ updated: number; failed: Array<{ id: number; code: string }> }> {
+  const failed: Array<{ id: number; code: string }> = [];
+  let updated = 0;
+  if (ids.length === 0) return { updated, failed };
+
+  // id → identifier を 1 クエリで前段解決 (N+1 回避)。
+  const rows = await db
+    .select({ id: todos.id, identifier: todos.identifier })
+    .from(todos)
+    .where(inArray(todos.id, ids));
+  const identById = new Map(rows.map((r) => [Number(r.id), r.identifier]));
+
+  for (const id of ids) {
+    const identifier = identById.get(id);
+    if (!identifier) {
+      failed.push({ id, code: "not_found" });
+      continue;
+    }
+    try {
+      const row = await updateTodo({ identifier, ...patch });
+      if (row) updated += 1;
+      else failed.push({ id, code: "update_failed" });
+    } catch (e) {
+      console.warn(`[todos] batch update failed for id ${id}:`, e);
+      failed.push({ id, code: "update_failed" });
+    }
   }
-  return row;
+  return { updated, failed };
 }
 
 export async function deleteTodo(identifier: string): Promise<Todo | null> {
@@ -345,7 +393,7 @@ export async function getTodoByIdentifier(identifier: string): Promise<Todo | nu
 export type ListTodosOpts = {
   projectName?: string;
   tag?: string;
-  states?: Array<"backlog" | "in_progress" | "blocked" | "done">;
+  states?: Array<"backlog" | "in_progress" | "blocked" | "done" | "cancelled">;
   /** これより前に期限が来るもの (ISO or Date)。期限なし todo は対象外 */
   dueBefore?: Date;
   /** 完了済みも含むか (デフォルト false) */
@@ -371,8 +419,8 @@ export async function listTodos(opts: ListTodosOpts = {}): Promise<{ todo: Todo;
   if (opts.states && opts.states.length > 0) {
     conds.push(inArray(todos.state, opts.states));
   } else if (!opts.includeCompleted) {
-    // デフォルトは done を除外
-    conds.push(sql`${todos.state} != 'done'`);
+    // デフォルトは inactive (done / cancelled) を除外
+    conds.push(sql`${todos.state} not in ('done','cancelled')`);
   }
   if (opts.dueBefore) {
     conds.push(and(isNotNull(todos.dueAt), lte(todos.dueAt, opts.dueBefore))!);
@@ -475,6 +523,7 @@ export function formatTodoListMarkdown(
   const priLabel = (p: number) => (p === 3 ? "🔴" : p === 1 ? "🔵" : "🟡");
   const stateLabel = (s: string) => {
     if (s === "done") return "✅ 完了";
+    if (s === "cancelled") return "🚫 中止";
     if (s === "in_progress") return "▶ 進行中";
     if (s === "blocked") return "🛑 ブロック";
     return "⚪ backlog";

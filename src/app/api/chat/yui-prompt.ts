@@ -250,7 +250,7 @@ identifier "T-1", "T-2" の連番で参照する。
 ## 構造
 - project (上位の入れ物): "Yui アプリ", "本", "確定申告", "個人TODO" など。任意 (Inbox = project なし)。
 - tag (横断ラベル、複数可): "本", "メール", "買い物", "緊急", "Q3" など。自由テキスト。
-- state: backlog (既定) / in_progress / blocked / done
+- state: backlog (既定) / in_progress / blocked / done / cancelled (中止 = もうやらないと決めたもの。完了扱いで隠すが達成には数えない)
 
 ## 追加
 - 「ローマ字図鑑読みたい」 → add_todo(title="ローマ字図鑑", tags=["本"])

@@ -5,7 +5,7 @@ import type { ToolDef } from "../types";
 export const listTodosTool: ToolDef = {
   name: "list_todos",
   description:
-    "TODO 一覧。project/tag/state でフィルタ可。デフォルトは未完了 (done 除外)。" +
+    "TODO 一覧。project/tag/state でフィルタ可。デフォルトは未完了 (done/cancelled 除外)。" +
     "出力は compact 1 行 'T-42|state|due|p2|project|tags|title' 形式 (token 節約)。",
   input_schema: {
     type: "object",
@@ -14,10 +14,10 @@ export const listTodosTool: ToolDef = {
       tag: { type: "string" },
       states: {
         type: "array",
-        items: { type: "string", enum: ["backlog", "in_progress", "blocked", "done"] },
+        items: { type: "string", enum: ["backlog", "in_progress", "blocked", "done", "cancelled"] },
       },
       due_before: { type: "string", description: "ISO8601 (これより前期限のみ)" },
-      include_completed: { type: "boolean" },
+      include_completed: { type: "boolean", description: "完了・中止 (inactive) も含める" },
       limit: { type: "integer", description: "(任意) デフォルト 50" },
     },
     additionalProperties: false,

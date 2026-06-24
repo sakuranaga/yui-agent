@@ -44,7 +44,7 @@ function todoView(t: Todo, projectName: string | null) {
   };
 }
 
-const STATE = z.enum(["backlog", "in_progress", "blocked", "done"]);
+const STATE = z.enum(["backlog", "in_progress", "blocked", "done", "cancelled"]);
 
 export function registerTodoTools(server: McpServer): void {
   server.registerTool(
@@ -88,7 +88,7 @@ export function registerTodoTools(server: McpServer): void {
       description: "TODO を一覧する。project 絞り込み・完了含む・件数制限は任意。",
       inputSchema: {
         project: z.string().optional(),
-        include_done: z.boolean().optional().describe("完了済も含めるか (既定 false)"),
+        include_done: z.boolean().optional().describe("完了・中止 (inactive) も含めるか (既定 false)"),
         limit: z.number().int().positive().max(200).optional(),
       },
     },

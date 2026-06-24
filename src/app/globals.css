@@ -2955,6 +2955,36 @@ body > div {
   outline: none;
 }
 .todo-modal-actions { margin-left: auto; }
+/* ヘッダの選択モードツール群 (検索の右、＋新規の左) */
+.todo-modal-header-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.todo-sort-btn {
+  background: #fff;
+  border: 1.5px solid rgba(45, 34, 56, 0.18);
+  color: rgba(45, 34, 56, 0.75);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+.todo-sort-btn:hover { background: rgba(var(--accent-rgb), 0.06); }
+.todo-sort-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.todo-checked-info {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+}
 .todo-modal-header h1 {
   margin: 0;
   font-size: 33px;
@@ -3248,6 +3278,8 @@ body > div {
   cursor: pointer;
   transition: all 0.12s ease;
   box-shadow: 0 1px 2px rgba(20, 8, 16, 0.04);
+  user-select: none;
+  -webkit-user-select: none;
 }
 .todo-row:hover {
   background: rgba(var(--accent-rgb), 0.05);
@@ -3256,6 +3288,21 @@ body > div {
   background: rgba(var(--accent-rgb), 0.1);
   border-color: var(--accent);
   box-shadow: 0 3px 10px rgba(var(--accent-rgb), 0.22);
+}
+/* 複数選択モード: 左にチェックボックスを並べる (mail-row.select-mode に倣う) */
+.todo-row.select-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.todo-row.select-mode > .todo-row-main { flex: 1; min-width: 0; }
+.todo-row.checked {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.4);
+}
+/* 選択はカードの色 (.todo-row.checked) で示すため、チェックボックスは非表示にする。 */
+.todo-row-check {
+  display: none;
 }
 
 .todo-row-main {
@@ -3363,6 +3410,12 @@ body > div {
   text-decoration: line-through;
   color: rgba(45, 34, 56, 0.45);
 }
+/* 中止: done と同じく打ち消し線だが、色をグレー寄りにして区別する。 */
+.todo-title-multiline.cancelled {
+  text-decoration: line-through;
+  color: rgba(45, 34, 56, 0.4);
+  font-style: italic;
+}
 .todo-due {
   font-variant-numeric: tabular-nums;
   font-size: 12.5px;
@@ -3405,10 +3458,16 @@ body > div {
 .todo-state-in_progress { background: rgba(56, 132, 240, 0.18); color: #2058b4; }
 .todo-state-blocked     { background: rgba(225, 88, 80, 0.18); color: #b84236; }
 .todo-state-done        { background: rgba(54, 168, 110, 0.18); color: #21744a; }
+.todo-state-cancelled   { background: rgba(45, 34, 56, 0.1); color: rgba(45, 34, 56, 0.55); }
 
 .todo-title.done {
   text-decoration: line-through;
   color: rgba(45, 34, 56, 0.45);
+}
+.todo-title.cancelled {
+  text-decoration: line-through;
+  color: rgba(45, 34, 56, 0.4);
+  font-style: italic;
 }
 
 /* 右ペインのタイトル: クリックで span ↔ input トグル。
@@ -3837,6 +3896,66 @@ select.todo-proj-edit {
   font-size: 13px;
 }
 
+/* === 一括編集パネル (右ペイン) === */
+.todo-bulk-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.todo-bulk-head { flex: 0 0 auto; margin-bottom: 6px; }
+.todo-bulk-head h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.todo-bulk-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: rgba(45, 34, 56, 0.55);
+}
+.todo-bulk-panel > .todo-edit-grid {
+  flex: 0 0 auto;
+  margin-top: 14px;
+}
+.todo-bulk-project { position: relative; }
+.todo-bulk-project-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1.5px solid rgba(45, 34, 56, 0.16);
+  color: #2d2238;
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  width: 100%;
+  justify-content: space-between;
+}
+.todo-bulk-project-display:hover { background: rgba(var(--accent-rgb), 0.06); }
+.todo-bulk-mixed {
+  font-size: 11px;
+  color: rgba(45, 34, 56, 0.45);
+  align-self: center;
+  font-style: italic;
+}
+.todo-bulk-foot {
+  flex: 0 0 auto;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.todo-bulk-result {
+  font-size: 12px;
+  color: rgba(45, 34, 56, 0.6);
+  font-weight: 600;
+}
+
 /* 詳細部分: 旧 inline detail を流用 */
 .todo-row-detail {
   margin-top: 0;
@@ -3897,6 +4016,11 @@ select.todo-proj-edit {
   background: rgba(225, 88, 80, 0.16);
   border-color: rgba(225, 88, 80, 0.6);
   color: #b84236;
+}
+.todo-state-btn.todo-state-cancelled {
+  background: rgba(45, 34, 56, 0.08);
+  border-color: rgba(45, 34, 56, 0.35);
+  color: rgba(45, 34, 56, 0.55);
 }
 
 /* 編集フォーム grid */

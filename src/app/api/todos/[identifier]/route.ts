@@ -17,7 +17,7 @@ type Patch = {
   tags?: string[];
   note?: string;
   url?: string;
-  state?: "backlog" | "in_progress" | "blocked" | "done";
+  state?: "backlog" | "in_progress" | "blocked" | "done" | "cancelled";
   priority?: 1 | 2 | 3;
   start_at?: string | null;
   due_at?: string | null;

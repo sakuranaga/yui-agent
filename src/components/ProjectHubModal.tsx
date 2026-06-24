@@ -53,7 +53,7 @@ type HubData = {
     id: number;
     identifier: string;
     title: string;
-    state: "backlog" | "in_progress" | "blocked" | "done";
+    state: "backlog" | "in_progress" | "blocked" | "done" | "cancelled";
     priority: 1 | 2 | 3;
     due_at: string | null;
     completed_at: string | null;
@@ -100,6 +100,7 @@ const STATE_LABEL: Record<string, string> = {
   in_progress: "進行中",
   blocked: "確認待",
   done: "完了",
+  cancelled: "中止",
 };
 
 function fmtDate(iso: string | null): string {
@@ -311,7 +312,7 @@ export default function ProjectHubModal({ open, onClose }: Props) {
                 {/* TODO */}
                 <section className="project-hub-section">
                   {(() => {
-                    const open = hub.todos.filter((t) => t.state !== "done");
+                    const open = hub.todos.filter((t) => t.state !== "done" && t.state !== "cancelled");
                     const done = hub.todos.filter((t) => t.state === "done");
                     return (
                       <>
