@@ -244,6 +244,7 @@ export async function runExecutor(opts: {
   const messages: Anthropic.MessageParam[] = [...recentHistory];
   const outcomes: ExecutorOutcome[] = [];
   const seenUnknown = new Set<string>(); // 同一 unknown 反復を no-progress 判定に使う
+  const seenRegistryCalls = new Set<string>(); // 同一 registry tool+input の反復停止に使う
   let iterations = 0;
   let asyncDispatched = false;
 
@@ -280,9 +281,15 @@ export async function runExecutor(opts: {
     messages.push({ role: "assistant", content: realToolUses });
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    const iterationOutcomes: ExecutorOutcome[] = [];
     let anyProgress = false;
     let budgetHit = false;
     let anyPending = false;
+    let transportExecuted = false;
+    const pushOutcome = (outcome: ExecutorOutcome) => {
+      outcomes.push(outcome);
+      iterationOutcomes.push(outcome);
+    };
     for (const tu of realToolUses) {
       const tool = toolByName.get(tu.name);
       if (!tool) {
@@ -291,7 +298,7 @@ export async function runExecutor(opts: {
           if (ledger.budgetRemaining <= 0) {
             const res = budgetSkipResult(tu.id);
             toolResults.push(res);
-            outcomes.push({ toolName: tu.name, input: tu.input, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "budget" } });
+            pushOutcome({ toolName: tu.name, input: tu.input, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "budget" } });
             budgetHit = true;
             continue;
           }
@@ -300,7 +307,7 @@ export async function runExecutor(opts: {
           if (seenExtra.has(ek)) {
             const res = dupSkipResult(tu.id);
             toolResults.push(res);
-            outcomes.push({ toolName: tu.name, input: tu.input, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "duplicate" } });
+            pushOutcome({ toolName: tu.name, input: tu.input, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "duplicate" } });
             continue;
           }
           ledger.budgetRemaining--;
@@ -324,7 +331,7 @@ export async function runExecutor(opts: {
           if (outcome.executionState === "failed" || outcome.executionState === "skipped") {
             seenExtra.delete(ek); // 失敗/skip は再試行可
           }
-          outcomes.push({ toolName: tu.name, input: tu.input, outcome });
+          pushOutcome({ toolName: tu.name, input: tu.input, outcome });
           toolResults.push(outcome.result);
           if (outcome.executionState !== "skipped") anyProgress = true;
           if (outcome.executionState === "executed") asyncDispatched = true;
@@ -336,14 +343,14 @@ export async function runExecutor(opts: {
         if (ledger.budgetRemaining <= 0) {
           const res = budgetSkipResult(tu.id);
           toolResults.push(res);
-          outcomes.push({ toolName: tu.name, input: tu.input, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "budget" } });
+          pushOutcome({ toolName: tu.name, input: tu.input, outcome: { executionState: "skipped", disposition: "report", result: res, skipReason: "budget" } });
           budgetHit = true;
           continue;
         }
         ledger.budgetRemaining--;
         const res = unknownToolResult(tu.id, tu.name);
         toolResults.push(res);
-        outcomes.push({ toolName: tu.name, outcome: { executionState: "failed", disposition: "report", result: res } });
+        pushOutcome({ toolName: tu.name, outcome: { executionState: "failed", disposition: "report", result: res } });
         // 新規 unknown のみ進捗扱い。同一 unknown 反復は no-progress で止める (Codex P2b Low)。
         const k = unknownKey(tu.name, tu.input);
         if (!seenUnknown.has(k)) {
@@ -352,20 +359,56 @@ export async function runExecutor(opts: {
         }
         continue;
       }
+      const registryCallKey = `${tu.name}|${stableStringify(tu.input)}`;
+      if (seenRegistryCalls.has(registryCallKey)) {
+        return { outcomes, iterations, stopReason: "no_progress" };
+      }
+      seenRegistryCalls.add(registryCallKey);
       const outcome = await dispatchTool(tool, { id: tu.id, input: tu.input }, ctx, ledger);
-      outcomes.push({ toolName: tu.name, input: tu.input, outcome });
+      pushOutcome({ toolName: tu.name, input: tu.input, outcome });
       toolResults.push(outcome.result);
+      if (tool.surface === "transport" && outcome.executionState === "executed") {
+        transportExecuted = true;
+      }
       if (outcome.executionState !== "skipped") anyProgress = true;
       if (outcome.executionState === "pending_confirmation") anyPending = true;
       if (outcome.skipReason === "budget") budgetHit = true;
     }
-    messages.push({ role: "user", content: toolResults });
-
     // confirm は「実行待ち」= 以降の LLM 再呼び出しを止め、confirm flow に委ねる (Codex P2b High)。
     if (anyPending) return { outcomes, iterations, stopReason: "pending_confirmation" };
     if (budgetHit) return { outcomes, iterations, stopReason: "budget" };
     if (!anyProgress) return { outcomes, iterations, stopReason: "no_progress" };
     if (asyncDispatched) return { outcomes, iterations, stopReason: "async_dispatched" };
+    if (
+      transportExecuted &&
+      iterationOutcomes.every((o) => o.outcome.executionState === "executed")
+    ) {
+      return { outcomes, iterations, stopReason: "single_pass" };
+    }
+    // silent 成功だけで完結するツール (music_pause / music_next / 軽い mutate 等) は
+    // ツール結果を LLM に再投入しない。弱いローカルモデルが同じ transport を繰り返し、
+    // max_iter → 誤った失敗報告になるのを防ぐ。
+    if (
+      iterationOutcomes.length > 0 &&
+      iterationOutcomes.every(
+        (o) => o.outcome.executionState === "executed" && o.outcome.disposition === "silent",
+      )
+    ) {
+      return { outcomes, iterations, stopReason: "single_pass" };
+    }
+    if (process.env.DEBUG_TOOL_EXECUTOR === "1") {
+      console.log(
+        `[executor] iter=${iterations} continuing outcomes=` +
+          iterationOutcomes
+            .map(
+              (o) =>
+                `${o.toolName}:${o.outcome.executionState}/${o.outcome.disposition}` +
+                (o.outcome.skipReason ? `/${o.outcome.skipReason}` : ""),
+            )
+            .join(","),
+      );
+    }
+    messages.push({ role: "user", content: toolResults });
     // single-pass executor (xLAM 等の function-calling 専用モデル) は 1 回で parallel に
     // 全ツールを出すので、tool_result を含む 2 回目を呼ばずここで終了する。これにより
     // multi-turn 非対応モデルの 500 (graceful catch の backstop) と無駄な再呼び出しを回避。

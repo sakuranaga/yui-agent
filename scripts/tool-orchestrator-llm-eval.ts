@@ -14,6 +14,7 @@ import { addReminderTool } from "@/lib/tools/reminder/add_reminder";
 import { addTodoTool } from "@/lib/tools/todo/add_todo";
 import { saveNote } from "@/lib/tools/note/save_note";
 import { gmailSearch } from "@/lib/tools/mail/gmail_search";
+import { musicPause } from "@/lib/tools/music/music_pause";
 import { musicNowPlaying } from "@/lib/tools/music/music_now_playing";
 import { searchContactsTool } from "@/lib/tools/contact/search_contacts";
 import { webSearch } from "@/lib/tools/web/web_search";
@@ -69,6 +70,7 @@ const registryTools = [
   cloneForEval(addTodoTool),
   cloneForEval(saveNote),
   cloneForEval(gmailSearch),
+  cloneForEval(musicPause),
   cloneForEval(musicNowPlaying),
   cloneForEval(searchContactsTool),
   cloneForEval(webSearch),
@@ -208,6 +210,25 @@ const fixtures: Fixture[] = [
     expectedGate: "tool_required",
     expectedTool: "music_now_playing",
     expectedState: "executed",
+  },
+  {
+    name: "music pause completes without report loop",
+    messages: [{ role: "user", content: "おやすみ。音楽止めて" }],
+    expectedGate: "tool_required",
+    expectedTool: "music_pause",
+    expectedState: "executed",
+    expectedStop: "single_pass",
+    validate: (result) => {
+      if (!result.exec) return ["executor did not run"];
+      const plan = planExecutorResponse({
+        outcomes: result.exec.outcomes,
+        stopReason: result.exec.stopReason,
+        isUserTurn: true,
+        gateRequired: true,
+        didMainFallback: false,
+      });
+      return plan.needsC ? ["silent music_pause should not require C report"] : [];
+    },
   },
   {
     name: "contact read routes to contact search",

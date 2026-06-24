@@ -418,10 +418,25 @@ async function executeFetch<T>(
     }
     throw new Error(`Spotify API ${res.status} ${path}: ${text}`);
   }
-  // GET 以外でも JSON 返さないことがあるので length チェック
+  // GET 以外でも JSON を返さない成功レスポンスがある。制御系は副作用が
+  // 成功していれば本文を必須にしない。
   const text = await res.text();
   if (text.length === 0) return null;
-  return JSON.parse(text) as T;
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    return JSON.parse(text) as T;
+  }
+  if ((init.method ?? "GET") !== "GET") {
+    if (process.env.DEBUG_SPOTIFY_API === "1") {
+      console.debug(
+        `[spotify-api] ${res.status} ${init.method ?? "GET"} ${path}: non-json success body ignored`,
+      );
+    }
+    return null;
+  }
+  throw new Error(
+    `Spotify API ${res.status} ${path}: expected JSON response, got ${contentType || "unknown content-type"}`,
+  );
 }
 
 // ---------- Web API 個別 endpoint ----------

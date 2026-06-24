@@ -192,6 +192,9 @@ function inferResponsePolicy(args: {
   ) {
     return { responsePolicy: "final", userVisible: "final" };
   }
+  if (args.tool.surface === "transport" && args.tool.domain === "music") {
+    return { responsePolicy: "final", userVisible: "final" };
+  }
   return { responsePolicy: "none", userVisible: "none" };
 }
 
