@@ -27,6 +27,7 @@ export const spotifyNowPlaying: ToolDef = {
         album: np.albumName,
         durationMs: np.durationMs,
         id: np.trackUri,
+        isPlaying: np.isPlaying,
         updatedAt: Date.now(),
       });
       return {
