@@ -91,8 +91,12 @@ export default function EnvironmentWidget() {
   }, []);
 
   useEffect(() => {
-    if (!locOk) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-locOk fetch + polling
+    // ブラウザ geolocation の成否に関わらず weather を取りに行く。
+    // サーバは DB に保存済みの location から天気を返せる (locOk=false でも表示される)。
+    // 未設定なら /api/weather が 404 → refreshWeather は no-op で weather 非表示のまま。
+    // locOk が true に変わった (= 新しい位置を post した) 直後は即時 refresh したいので
+    // locOk を依存に残す。
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount fetch + polling
     void refreshWeather();
     const id = setInterval(refreshWeather, WEATHER_REFRESH_MS);
     const onVisible = () => {

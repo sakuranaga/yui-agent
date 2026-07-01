@@ -4,7 +4,7 @@
  * Frontend (EnvironmentWidget) がポーリングする。
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { getLocation } from "@/lib/location";
+import { getLocation, loadLocationFromDb } from "@/lib/location";
 import { getCurrentWeather, isWeatherEnabled } from "@/lib/weather";
 import { clientError } from "@/lib/api-error";
 
@@ -15,7 +15,12 @@ export async function GET(req: NextRequest) {
       { status: 503 }
     );
   }
-  const loc = getLocation();
+  let loc = getLocation();
+  if (!loc) {
+    // web プロセス起動直後で未ロードなら DB から復元 (dedup 済み)。保険経路。
+    await loadLocationFromDb();
+    loc = getLocation();
+  }
   if (!loc) {
     return NextResponse.json(
       { error: "no location set yet" },

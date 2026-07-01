@@ -6,7 +6,6 @@ import { pruneOldNews } from "@/lib/news";
 import { loadLocationFromDb } from "@/lib/location";
 import { migrateOAuthTokensToEncrypted } from "@/lib/oauth-token-migrate";
 import { seedTtsDictionaryIfEmpty } from "@/lib/tts-dictionary";
-import { rearmAllPending } from "@/lib/timers";
 
 const MAINTENANCE_LOCK_NAME = "vroid:background:maintenance";
 const MAINTENANCE_INTERVAL_MS = Number(process.env.WORKER_MAINTENANCE_INTERVAL_MS ?? 5 * 60 * 1000);
@@ -70,12 +69,9 @@ async function runBootMaintenance(): Promise<void> {
     console.warn("[worker:maintenance] loadLocationFromDb failed:", e);
   }
 
-  try {
-    const n = await rearmAllPending();
-    if (n > 0) console.log(`[worker:maintenance] re-armed ${n} pending timer(s)`);
-  } catch (e) {
-    console.warn("[worker:maintenance] rearmAllPending failed:", e);
-  }
+  // NOTE: timer の rearm/発火は web プロセスが所有する (src/instrumentation.ts)。
+  // fireNow は in-memory SSE push (pushToSession) と localhost /api/chat 経由の
+  // onFire dispatch を使うため、worker から発火すると通知が届かない。ここでは rearm しない。
 
   try {
     await migrateOAuthTokensToEncrypted();

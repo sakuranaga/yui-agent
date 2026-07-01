@@ -92,13 +92,16 @@ export function getPlaceLabel(): string | null {
  */
 export async function loadLocationFromDb(): Promise<void> {
   if (globalThis.__vroidLocationLoaded) return;
-  globalThis.__vroidLocationLoaded = true;
   try {
     const [row] = await db
       .select()
       .from(userLocation)
       .where(eq(userLocation.id, 1))
       .limit(1);
+    // DB 応答が返った時点で loaded 確定 (row の有無に関わらず)。
+    // ※ フラグを DB 呼び出し前に立てると、起動直後の DB 一時失敗で永久 no-op になり
+    //    後続の保険 (safeWeather / /api/weather) も再試行できなくなるため、成功後に立てる。
+    globalThis.__vroidLocationLoaded = true;
     if (!row) return;
     if (globalThis.__vroidLocation) return; // 競合: 先に setLocation された
     globalThis.__vroidLocation = {

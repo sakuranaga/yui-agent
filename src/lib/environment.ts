@@ -18,7 +18,7 @@
 import { buildTimeContextBlock } from "./time";
 import { getNowPlaying } from "./music-commands";
 import { listActiveTimers } from "./timers";
-import { getLocation, getPlaceLabel } from "./location";
+import { getLocation, getPlaceLabel, loadLocationFromDb } from "./location";
 import { getCurrentWeather, isWeatherEnabled } from "./weather";
 import { listReminders } from "./reminders";
 import { listEvents } from "./gcal";
@@ -174,7 +174,12 @@ async function safeListTimers(sessionId: string): Promise<string | null> {
 
 async function safeWeather(): Promise<string | null> {
   if (!isWeatherEnabled()) return null;
-  const loc = getLocation();
+  let loc = getLocation();
+  if (!loc) {
+    // web プロセス起動直後で未ロードなら DB から復元 (dedup 済みで安い)。保険経路。
+    await loadLocationFromDb();
+    loc = getLocation();
+  }
   if (!loc) return null;
   try {
     const w = await getCurrentWeather({ lat: loc.lat, lon: loc.lon });

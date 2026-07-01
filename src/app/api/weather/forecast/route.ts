@@ -4,7 +4,7 @@
  *   凍結のまま返す。EnvironmentWidget 吹き出し / CalendarModal 日付セル 共通データ源。
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { getLocation } from "@/lib/location";
+import { getLocation, loadLocationFromDb } from "@/lib/location";
 import { fetchAndUpsertForecast, isWeatherEnabled } from "@/lib/weather";
 import { clientError } from "@/lib/api-error";
 
@@ -14,7 +14,12 @@ export async function GET(req: NextRequest) {
   if (!isWeatherEnabled()) {
     return NextResponse.json({ error: "weather not enabled" }, { status: 503 });
   }
-  const loc = getLocation();
+  let loc = getLocation();
+  if (!loc) {
+    // web プロセス起動直後で未ロードなら DB から復元 (dedup 済み)。保険経路。
+    await loadLocationFromDb();
+    loc = getLocation();
+  }
   if (!loc) {
     return NextResponse.json({ error: "no location set yet" }, { status: 404 });
   }
