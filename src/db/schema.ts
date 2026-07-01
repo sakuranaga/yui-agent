@@ -304,6 +304,37 @@ export const eventsOutbox = pgTable(
 export type EventsOutboxRow = typeof eventsOutbox.$inferSelect;
 export type NewEventsOutboxRow = typeof eventsOutbox.$inferInsert;
 
+export const eventDeliveries = pgTable(
+  "event_deliveries",
+  {
+    eventId: bigint("event_id", { mode: "number" })
+      .notNull()
+      .references(() => eventsOutbox.id, { onDelete: "cascade" }),
+    clientId: text("client_id").notNull(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.eventId, t.clientId] }),
+    index("idx_event_deliveries_client").on(t.clientId, t.deliveredAt.desc()),
+  ],
+);
+export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;
+
+export const eventClients = pgTable(
+  "event_clients",
+  {
+    clientId: text("client_id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    replayFromEventId: bigint("replay_from_event_id", { mode: "number" }).notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_event_clients_session").on(t.sessionId, t.updatedAt.desc()),
+  ],
+);
+export type EventClientRow = typeof eventClients.$inferSelect;
+
 /**
  * Phase 3 (前倒し): rolling extraction の進捗追跡。
  * セッションごとに最後に抽出した raw_messages.id を保持し、

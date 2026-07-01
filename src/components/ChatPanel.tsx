@@ -79,6 +79,7 @@ type Props = {
 const VOLUME_STORAGE_KEY = "vroid-yui-voice-volume";
 const LEGACY_VOLUME_KEY = "vroid-chat-volume";
 const SESSION_STORAGE_KEY = "vroid-chat-session-id";
+const SSE_CLIENT_STORAGE_KEY = "vroid-chat-sse-client-id";
 const DEFAULT_VOLUME = 1; // SSR で使う初期値 (実値は mount 後に localStorage から復元)
 
 function readVolumeFromStorage(): number {
@@ -90,6 +91,18 @@ function readVolumeFromStorage(): number {
   if (raw == null) return DEFAULT_VOLUME;
   const n = Number(raw);
   return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : DEFAULT_VOLUME;
+}
+
+function readOrCreateSseClientId(): string {
+  if (typeof window === "undefined") return "ssr";
+  const existing = window.sessionStorage.getItem(SSE_CLIENT_STORAGE_KEY);
+  if (existing) return existing;
+  const id =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  window.sessionStorage.setItem(SSE_CLIENT_STORAGE_KEY, id);
+  return id;
 }
 
 /**
@@ -239,6 +252,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
   // setState in effect を回避できる (React 19 推奨パターン)。
   const [volume, setVolume] = useState<number>(() => readVolumeFromStorage());
   const sessionIdRef = useRef<string>("");
+  const sseClientIdRef = useRef<string>("");
   // useUserState に渡すため、sessionId を state でも保持 (mount 後 1 回 set)
   const [sessionId, setSessionId] = useState<string>("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -281,6 +295,7 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
   const speakGenerationRef = useRef(0);
   const onBotResponseRef = useRef(onBotResponse);
   const seenSseMessageKeysRef = useRef<Map<string, number>>(new Map());
+  const pendingRecoveryInFlightRef = useRef(false);
   useEffect(() => {
     onBotResponseRef.current = onBotResponse;
   }, [onBotResponse]);
@@ -293,13 +308,15 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
   // volume は上の useState lazy init で取り込み済み。
   useEffect(() => {
     const sid = readOrCreateSessionId();
+    const clientId = readOrCreateSseClientId();
     sessionIdRef.current = sid;
+    sseClientIdRef.current = clientId;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount sessionId init from localStorage
     setSessionId(sid);
 
     // SSE 接続: bg job 完了の push を受ける
     const es = new EventSource(
-      `/api/chat/stream?session=${encodeURIComponent(sid)}`
+      `/api/chat/stream?session=${encodeURIComponent(sid)}&client=${encodeURIComponent(clientId)}`
     );
     sseRef.current = es;
 
@@ -563,6 +580,75 @@ export default function ChatPanel({ onBotResponse, onReportUpdate, audioBridge }
     // playChime は SSE 接続中に最新値を呼び出すが、deps に入れると毎レンダー SSE 再接続になるので意図的に固定。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (pendingJobs.size === 0) return;
+    const timer = window.setInterval(() => {
+      if (pendingRecoveryInFlightRef.current) return;
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      const now = Date.now();
+      const staleIds = [...pendingJobs.entries()]
+        .filter(([, job]) => now - job.startedAt > 12_000)
+        .map(([id]) => id);
+      if (staleIds.length === 0) return;
+      pendingRecoveryInFlightRef.current = true;
+      void fetch(
+        `/api/chat/jobs?session=${encodeURIComponent(sid)}&ids=${encodeURIComponent(staleIds.join(","))}`,
+      )
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`job status ${res.status}`);
+          return (await res.json()) as {
+            jobs: Array<{
+              id: number;
+              status: "pending" | "running" | "succeeded" | "failed";
+              yuiText: string | null;
+              emotion: VRMExpression | null;
+              report: { title: string | null; markdown: string | null; noteId: number | null } | null;
+            }>;
+          };
+        })
+        .then((data) => {
+          for (const job of data.jobs) {
+            if (job.status !== "succeeded" && job.status !== "failed") continue;
+            if (job.status === "succeeded" && job.yuiText) {
+              const eventKey = `${job.id}:${job.yuiText}`;
+              if (!seenSseMessageKeysRef.current.has(eventKey)) {
+                seenSseMessageKeysRef.current.set(eventKey, Date.now());
+                onBotResponseRef.current(job.yuiText, job.emotion ?? "neutral");
+                const chunks =
+                  appendAssistantChunksRef.current?.(
+                    job.yuiText,
+                    undefined,
+                    "overlay-ephemeral",
+                  ) ?? [];
+                if (enqueueSpeakRef.current && chunks.length > 0) {
+                  enqueueSpeakRef.current(chunks);
+                }
+              }
+              if (job.report?.title && job.report.markdown) {
+                onReportUpdateRef.current?.(
+                  job.report.title,
+                  job.report.markdown,
+                  job.report.noteId ?? undefined,
+                );
+              }
+            }
+            setPendingJobs((m) => {
+              if (!m.has(job.id)) return m;
+              const next = new Map(m);
+              next.delete(job.id);
+              return next;
+            });
+          }
+        })
+        .catch((e) => console.warn("[chat] pending job recovery failed:", e))
+        .finally(() => {
+          pendingRecoveryInFlightRef.current = false;
+        });
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [pendingJobs]);
 
   // Push the slider value into the (already-running) gain node, and persist.
   useEffect(() => {

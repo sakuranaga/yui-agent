@@ -1,7 +1,7 @@
 import Redis from "ioredis";
-import { and, asc, eq, gt, inArray, isNull, lte, or, sql as drizzleSql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lte, notExists, or, sql as drizzleSql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { eventsOutbox, type EventsOutboxRow } from "@/db/schema";
+import { eventClients, eventDeliveries, eventsOutbox, type EventsOutboxRow } from "@/db/schema";
 import type { ServerEvent } from "@/lib/jobs/events";
 
 const VALKEY_URL = process.env.VALKEY_URL ?? "redis://valkey:6379";
@@ -77,18 +77,51 @@ export async function appendOutboxEvent(
 
 export async function drainOutboxForSession(
   sessionId: string,
+  clientId: string,
   send: (event: ServerEvent) => boolean,
 ): Promise<number> {
   return db.transaction(async (tx) => {
+    const baselineRows = await tx
+      .insert(eventClients)
+      .values({
+        clientId,
+        sessionId,
+        replayFromEventId: drizzleSql<number>`(
+          SELECT COALESCE(MAX(${eventsOutbox.id}), 0)
+          FROM ${eventsOutbox}
+          WHERE ${eventsOutbox.sessionId} = ${sessionId}
+        )`,
+      })
+      .onConflictDoUpdate({
+        target: eventClients.clientId,
+        set: {
+          sessionId,
+          updatedAt: drizzleSql`now()`,
+        },
+      })
+      .returning({ replayFromEventId: eventClients.replayFromEventId });
+    const replayFromEventId = baselineRows[0]?.replayFromEventId ?? 0;
+
     const claimed = await tx
       .select()
       .from(eventsOutbox)
       .where(
         and(
           eq(eventsOutbox.sessionId, sessionId),
-          isNull(eventsOutbox.deliveredAt),
+          gt(eventsOutbox.id, replayFromEventId),
           lte(eventsOutbox.availableAt, drizzleSql`now()`),
           or(isNull(eventsOutbox.expiresAt), gt(eventsOutbox.expiresAt, drizzleSql`now()`)),
+          notExists(
+            tx
+              .select({ one: drizzleSql`1` })
+              .from(eventDeliveries)
+              .where(
+                and(
+                  eq(eventDeliveries.eventId, eventsOutbox.id),
+                  eq(eventDeliveries.clientId, clientId),
+                ),
+              ),
+          ),
         ),
       )
       .orderBy(asc(eventsOutbox.priority), asc(eventsOutbox.createdAt), asc(eventsOutbox.id))
@@ -102,8 +135,12 @@ export async function drainOutboxForSession(
     }
     if (deliveredIds.length > 0) {
       await tx
+        .insert(eventDeliveries)
+        .values(deliveredIds.map((id) => ({ eventId: id, clientId })))
+        .onConflictDoNothing();
+      await tx
         .update(eventsOutbox)
-        .set({ deliveredAt: drizzleSql`now()` })
+        .set({ deliveredAt: drizzleSql`COALESCE(${eventsOutbox.deliveredAt}, now())` })
         .where(inArray(eventsOutbox.id, deliveredIds));
     }
     return deliveredIds.length;

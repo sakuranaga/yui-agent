@@ -29,6 +29,7 @@ export async function GET(req: Request) {
     return new Response("session param required", { status: 400 });
   }
   const durable = url.searchParams.get("durable") !== "0";
+  const clientId = url.searchParams.get("client") ?? `legacy:${sessionId}`;
 
   const encoder = new TextEncoder();
 
@@ -52,7 +53,7 @@ export async function GET(req: Request) {
 
       const drain = () => {
         if (closed) return;
-        void drainOutboxForSession(sessionId, send).catch((e) =>
+        void drainOutboxForSession(sessionId, clientId, send).catch((e) =>
           console.warn("[sse] outbox drain failed:", e),
         );
       };

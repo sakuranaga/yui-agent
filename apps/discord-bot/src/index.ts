@@ -78,7 +78,10 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 function startSseSubscription(): void {
-  const url = `${YUI_API_URL}/api/chat/stream?session=${encodeURIComponent(SESSION_ID)}`;
+  const clientId = `discord:${SESSION_ID}`;
+  const url =
+    `${YUI_API_URL}/api/chat/stream?session=${encodeURIComponent(SESSION_ID)}` +
+    `&client=${encodeURIComponent(clientId)}`;
   console.log(`[bot] subscribing SSE: ${url}`);
   void runSseLoop({
     url,
@@ -177,7 +180,7 @@ async function handleMessage(msg: Message): Promise<void> {
           return { mediaType: sniffed, data: buf.toString("base64") };
         })
       )
-    ).filter((x): x is { mediaType: string; data: string } => x !== null);
+    ).filter((x): x is { mediaType: ImageMediaType; data: string } => x !== null);
 
     // 直近の Discord 履歴を取得 (この session のみ)
     const history = await fetchHistory(SESSION_ID, HISTORY_TURNS);
@@ -210,6 +213,7 @@ async function handleMessage(msg: Message): Promise<void> {
     // Discord は 1 メッセージ 2000 字制限 → split して順次送信。
     // 1:1 DM なので reply (返信参照) は使わず、普通の send で十分。
     const chunks = chunkForDiscord(reply);
+    if (!msg.channel.isSendable()) return;
     for (const chunk of chunks) {
       await msg.channel.send(chunk);
     }
@@ -256,7 +260,9 @@ async function fetchHistory(sessionId: string, limit: number): Promise<HistoryMe
  * Anthropic は media_type と実バイトの不一致を 400 で弾くので、
  * Discord の attachment.contentType を信用せずここで決定する。
  */
-function sniffImageMediaType(buf: Buffer): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | null {
+type ImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+
+function sniffImageMediaType(buf: Buffer): ImageMediaType | null {
   if (buf.length < 12) return null;
   // PNG: 89 50 4E 47 0D 0A 1A 0A
   if (
